@@ -103,6 +103,45 @@ def test_predict_action_rejects_invalid_selected_target(monkeypatch):
         predict_action(observation(), "Run the search", post=fake_post)
 
 
+def test_predict_action_returns_mode_for_selected_text_field(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
+    captured = {}
+    modes = {"SEARCH_SEED": 0.8, "FIELD_VALUE": 0.1, "IDENTIFIER": 0.04, "FREEFORM": 0.04, "VALUE_MISSING": 0.02}
+
+    def fake_post(_url, _key, body):
+        captured.update(body)
+        return {
+            "model": "jev-test",
+            "answers": {
+                "operation": {
+                    "choice": "TYPE_TEXT",
+                    "probabilities": {"CLICK": 0.1, "TYPE_TEXT": 0.8, "DONE": 0.05, "BLOCKED": 0.05},
+                    "confidence": 0.8,
+                },
+                "click_target": {
+                    "choice": "1",
+                    "probabilities": {"1": 0.4, "2": 0.6},
+                    "confidence": 0.2,
+                },
+                "type_text_target": {
+                    "choice": "1",
+                    "probabilities": {"1": 1.0},
+                    "confidence": 1.0,
+                },
+                "text_mode_1": {"choice": "SEARCH_SEED", "probabilities": modes, "confidence": 0.7},
+            },
+        }
+
+    prediction = predict_action(observation(), "Find a quiet hotel with free cancellation", post=fake_post)
+
+    assert prediction["operation"] == "TYPE_TEXT"
+    assert prediction["target"] == 1
+    assert prediction["text_mode"] == "SEARCH_SEED"
+    assert prediction["text_mode_probabilities"] == modes
+    assert captured["questions"]["text_mode_1"]["instructions"]["field"]["name"] == "Destination"
+    assert "text_mode_2" not in captured["questions"]
+
+
 def test_load_env_does_not_replace_existing_process_value(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text("TYPESAFE_API_KEY=file-key\nTYPESAFE_MODEL=jev-test\n")

@@ -56,12 +56,13 @@ def test_text_state_omits_page_text_field_values_queries_and_typed_history():
     state = text_field_state(
         observation(),
         "Travel from Zurich to London",
-        {"operation": "TYPE_TEXT", "target": 2},
+        {"operation": "TYPE_TEXT", "target": 2, "text_mode": "FIELD_VALUE"},
         recent,
     )
     serialized = json.dumps(state)
 
     assert state["selected_field"] == {"role": "textbox", "name": "To"}
+    assert state["text_mode"] == "FIELD_VALUE"
     assert state["other_visible_fields"] == [{"role": "textbox", "name": "From", "filled": True}]
     assert state["current_page"]["url_without_query"] == "https://example.test/search"
     assert "Private visible page material" not in serialized
@@ -91,6 +92,7 @@ def test_generate_field_text_uses_gemini_compatible_strict_json(monkeypatch):
     assert captured["url"] == "https://model.example/v1/chat/completions"
     assert captured["key"] == "test-key"
     assert captured["body"]["response_format"]["type"] == "json_schema"
+    assert "SEARCH_SEED" in captured["body"]["messages"][0]["content"]
     assert json.loads(captured["body"]["messages"][1]["content"])["goal"] == "Travel to London"
 
 

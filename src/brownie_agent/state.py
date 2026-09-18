@@ -71,6 +71,7 @@ def text_field_state(observation: dict, goal: str, prediction: dict, recent_step
     ]
     return {
         "goal": goal,
+        "text_mode": prediction.get("text_mode"),
         "selected_field": {"role": selected["role"], "name": selected["name"]},
         "other_visible_fields": other_fields,
         "current_page": {

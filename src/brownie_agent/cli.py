@@ -94,6 +94,8 @@ def print_prediction(result: dict) -> None:
     else:
         print(f"Confidence: {prediction['confidence']:.3f}")
         print(f"Model: {prediction['model']} · {prediction['latency_ms']} ms\n")
+    if prediction.get("text_mode"):
+        print(f"Text mode: {prediction['text_mode']} ({prediction['text_mode_confidence']:.3f})\n")
     print_observation(result["observation"])
 
 
@@ -107,6 +109,8 @@ def print_step(result: dict) -> None:
     else:
         print(f"Confidence: {prediction['confidence']:.3f}")
         print(f"Model: {prediction['model']} · {prediction['latency_ms']} ms")
+    if prediction.get("text_mode"):
+        print(f"Text mode: {prediction['text_mode']} ({prediction['text_mode_confidence']:.3f})")
     print(f"Execution: {execution['status']}\n")
     print_observation(result["observation"])
 

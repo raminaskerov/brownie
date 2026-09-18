@@ -114,8 +114,12 @@ never retries a mutation and never continues into another model cycle. `CLICK`,
 `TYPE_TEXT`, and one-viewport scroll operations can execute. `DONE` and
 `BLOCKED` do not mutate the page.
 
-For `TYPE_TEXT`, Jev chooses the operation and observed field. Only then does an
-OpenAI-compatible Gemini helper receive a privacy-reduced state: the goal,
+For `TYPE_TEXT`, Jev chooses the operation, observed field, and a typed text mode:
+`SEARCH_SEED`, `FIELD_VALUE`, `IDENTIFIER`, `FREEFORM`, or `VALUE_MISSING`.
+Text-mode questions for all editable fields share the same Jev request, and code
+uses only the selected field's answer. A generic catalog search therefore gets a
+short subject such as `BMW X5`, not every requested filter. Only then does an
+OpenAI-compatible Gemini helper receive a privacy-reduced state: the goal, mode,
 selected field name/role, page title, URL without its query or fragment, other
 field names with only filled/empty status, and recent operation outcomes without
 typed values. It does not receive visible page text or any form values. Gemini
