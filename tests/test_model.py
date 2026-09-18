@@ -1,0 +1,116 @@
+import json
+
+import pytest
+
+from brownie_agent.config import load_env
+from brownie_agent.model import predict_action
+
+
+def observation():
+    return {
+        "url": "https://example.test/",
+        "title": "Example",
+        "text": "Search places",
+        "viewport": {"width": 1120, "height": 780, "scroll_y": 0, "document_height": 780},
+        "elements": [
+            {
+                "index": 1,
+                "node_id": 41,
+                "role": "searchbox",
+                "name": "Destination",
+                "value": "",
+                "checked": False,
+                "operations": ["CLICK", "TYPE_TEXT"],
+            },
+            {
+                "index": 2,
+                "node_id": 42,
+                "role": "button",
+                "name": "Search",
+                "value": "",
+                "checked": None,
+                "operations": ["CLICK"],
+            },
+        ],
+        "can_scroll_up": False,
+        "can_scroll_down": False,
+        "fingerprint": "not-sent",
+    }
+
+
+def test_predict_action_validates_operation_and_selected_target(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
+    captured = {}
+
+    def fake_post(url, key, body):
+        captured.update(url=url, key=key, body=body)
+        return {
+            "model": "jev-test",
+            "answers": {
+                "operation": {
+                    "choice": "CLICK",
+                    "probabilities": {"CLICK": 0.7, "TYPE_TEXT": 0.1, "DONE": 0.1, "BLOCKED": 0.1},
+                    "confidence": 0.8,
+                },
+                "click_target": {
+                    "choice": "2",
+                    "probabilities": {"1": 0.2, "2": 0.8},
+                    "confidence": 0.9,
+                },
+                "type_text_target": {
+                    "choice": "1",
+                    "probabilities": {"1": 1.0},
+                    "confidence": 1.0,
+                },
+            },
+        }
+
+    prediction = predict_action(observation(), "Run the search", post=fake_post)
+
+    assert prediction["operation"] == "CLICK"
+    assert prediction["target"] == 2
+    assert prediction["target_name"] == "Search"
+    assert prediction["executed"] is False
+    assert captured["key"] == "test-key"
+    assert captured["body"]["questions"]["click_target"]["criteria"].keys() == {"1", "2"}
+    assert captured["body"]["state"]["goal"] == "Run the search"
+    assert captured["body"]["state"]["current_page"]["visible_text"] == "Search places"
+    serialized_request = json.dumps(captured["body"])
+    assert "node_id" not in serialized_request
+    assert "not-sent" not in serialized_request
+
+
+def test_predict_action_rejects_invalid_selected_target(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
+
+    def fake_post(_url, _key, _body):
+        return {
+            "answers": {
+                "operation": {
+                    "choice": "CLICK",
+                    "probabilities": {"CLICK": 0.7, "TYPE_TEXT": 0.1, "DONE": 0.1, "BLOCKED": 0.1},
+                    "confidence": 0.8,
+                },
+                "click_target": {
+                    "choice": "99",
+                    "probabilities": {"99": 1.0},
+                    "confidence": 1.0,
+                },
+            }
+        }
+
+    with pytest.raises(ValueError, match="Invalid TypeSafe choice response"):
+        predict_action(observation(), "Run the search", post=fake_post)
+
+
+def test_load_env_does_not_replace_existing_process_value(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("TYPESAFE_API_KEY=file-key\nTYPESAFE_MODEL=jev-test\n")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "process-key")
+    monkeypatch.delenv("TYPESAFE_MODEL", raising=False)
+
+    loaded = load_env(env_file)
+
+    assert loaded == env_file
+    assert __import__("os").environ["TYPESAFE_API_KEY"] == "process-key"
+    assert __import__("os").environ["TYPESAFE_MODEL"] == "jev-test"

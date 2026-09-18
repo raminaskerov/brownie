@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Delayed page</title>
+  </head>
+  <body>
+    <script>
+      setTimeout(() => {
+        document.body.innerHTML = '<main><h1>Content rendered after navigation</h1><button>Ready</button></main>';
+      }, 200);
+    </script>
+  </body>
+</html>

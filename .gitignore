@@ -1,0 +1,9 @@
+.browser-profile/
+.browser-profile-cdp/
+.venv/
+.env
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+artifacts/

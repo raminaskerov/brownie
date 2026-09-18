@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Brownie observation fixture</title>
+    <style>
+      body { font-family: sans-serif; margin: 24px; }
+      .below-fold { margin-top: 1000px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Find a quiet place</h1>
+      <label for="query">Destination</label>
+      <input id="query" type="search" value="Baku" />
+
+      <label>
+        <input type="checkbox" checked />
+        Free cancellation
+      </label>
+
+      <button type="button" onclick="document.querySelector('#status').textContent = 'searched'">Find stays</button>
+      <a href="#details">Read details</a>
+      <a href="delayed_fixture.html">Open delayed page</a>
+      <output id="status">idle</output>
+
+      <button type="button" disabled>Unavailable action</button>
+      <button type="button" hidden>Hidden action</button>
+
+      <section class="below-fold">
+        <button type="button">Below-fold action</button>
+      </section>
+    </main>
+  </body>
+</html>
