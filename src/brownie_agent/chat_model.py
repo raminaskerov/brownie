@@ -1,6 +1,5 @@
 """Shared Gemini-compatible transport and bounded model-rate-limit fallback."""
 
-import fcntl
 import hashlib
 import json
 import math
@@ -8,15 +7,47 @@ import os
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .config import PROJECT_ROOT
+from .config import runtime_root
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 MAX_MODELS = 3
+
+
+def _lock_file(handle) -> None:
+    handle.seek(0)
+    if os.name == "nt":
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+    else:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+
+
+def _unlock_file(handle) -> None:
+    handle.seek(0)
+    if os.name == "nt":
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+@contextmanager
+def _exclusive_file(handle):
+    """Lock one cooldown file with the native Windows or Unix mechanism."""
+    _lock_file(handle)
+    try:
+        yield
+    finally:
+        _unlock_file(handle)
 
 
 class ModelHTTPError(RuntimeError):
@@ -58,27 +89,27 @@ class Cooldowns:
     def access(self, identity: str, now: float, until: float | None = None) -> float:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
-        with os.fdopen(descriptor, "r+") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            try:
-                entries = json.load(handle)
-            except ValueError:
-                entries = {}
-            if not isinstance(entries, dict):
-                entries = {}
-            entries = {
-                k: v for k, v in entries.items()
-                if isinstance(k, str) and type(v) in (int, float) and math.isfinite(v) and v > now
-            }
-            if until is not None:
-                entries[identity] = max(entries.get(identity, 0), until)
-            handle.seek(0)
-            handle.truncate()
-            json.dump(entries, handle)
-            return entries.get(identity, 0)
+        with os.fdopen(descriptor, "r+", encoding="utf-8") as handle:
+            with _exclusive_file(handle):
+                try:
+                    entries = json.load(handle)
+                except ValueError:
+                    entries = {}
+                if not isinstance(entries, dict):
+                    entries = {}
+                entries = {
+                    k: v for k, v in entries.items()
+                    if isinstance(k, str) and type(v) in (int, float) and math.isfinite(v) and v > now
+                }
+                if until is not None:
+                    entries[identity] = max(entries.get(identity, 0), until)
+                handle.seek(0)
+                handle.truncate()
+                json.dump(entries, handle)
+                return entries.get(identity, 0)
 
 
-COOLDOWNS = Cooldowns(PROJECT_ROOT / "artifacts" / "model-cooldowns.json")
+COOLDOWNS = Cooldowns(runtime_root() / "artifacts" / "model-cooldowns.json")
 
 
 def _seconds(value) -> float:

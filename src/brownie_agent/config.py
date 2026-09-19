@@ -1,13 +1,17 @@
-"""Small project-local .env loader; existing process variables win."""
+"""Small working-directory .env loader; existing process variables win."""
 
 import os
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+def runtime_root() -> Path:
+    """Return Brownie's explicit or current working directory for private runtime files."""
+    configured = os.environ.get("BROWNIE_RUNTIME_DIR", "").strip()
+    return Path(configured or Path.cwd()).expanduser().resolve()
 
 
 def load_env(path: str | Path | None = None) -> Path:
-    env_path = Path(path).expanduser().resolve() if path else PROJECT_ROOT / ".env"
+    env_path = Path(path).expanduser().resolve() if path else runtime_root() / ".env"
     if not env_path.exists():
         return env_path
     for raw_line in env_path.read_text(encoding="utf-8-sig").splitlines():

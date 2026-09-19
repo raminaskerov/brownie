@@ -43,6 +43,10 @@ Do not assume the problem is fixed by switching models or changing one prompt.
   output, authentication, and other failures stop. Cooldowns persist in ignored
   `artifacts/model-cooldowns.json`, using hashed identities and expiry times.
   Model fallback never repeats a browser action or switches Jev to LLM automatically.
+- Windows portability no longer has an import-time `fcntl` blocker: cooldown files
+  use `msvcrt.locking` on Windows and `fcntl.flock` on Unix. Windows installs pull
+  `tzdata`, and `.env` plus cooldown paths default to the working directory rather
+  than the installed package location. `BROWNIE_RUNTIME_DIR` overrides that root.
 - `controller.py` has tested budgets and cycle guards, but there is no automatic
   runner. The CLI currently calls steering without recent-step history; separate
   invocations do not retain a decision history.
@@ -79,7 +83,7 @@ wants the practical frictions addressed eventually; this chat ends before diagno
 
 ## Evidence / provenance
 
-- Latest completed full offline suite: **94 passed in 11.29s**. Ruff and
+- Latest completed full offline suite: **96 passed in 10.76s**. Ruff and
   `git diff --check` passed. Tests cover provider choice, fallback/cooldown behavior,
   invalid output, and freshness checks after steering and text-model fallback.
 - Live synthetic requests validated the primary LLM steerer and both configured

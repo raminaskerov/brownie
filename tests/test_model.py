@@ -188,3 +188,28 @@ def test_load_env_does_not_replace_existing_process_value(tmp_path, monkeypatch)
     assert loaded == env_file
     assert __import__("os").environ["TYPESAFE_API_KEY"] == "process-key"
     assert __import__("os").environ["TYPESAFE_MODEL"] == "jev-test"
+
+
+def test_load_env_defaults_to_runtime_working_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("BROWNIE_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("TYPESAFE_API_KEY=working-key\n")
+
+    loaded = load_env()
+
+    assert loaded == tmp_path / ".env"
+    assert __import__("os").environ["TYPESAFE_API_KEY"] == "working-key"
+
+
+def test_runtime_directory_override_controls_default_env_location(tmp_path, monkeypatch):
+    runtime = tmp_path / "private-runtime"
+    runtime.mkdir()
+    (runtime / ".env").write_text("TYPESAFE_MODEL=runtime-model\n")
+    monkeypatch.setenv("BROWNIE_RUNTIME_DIR", str(runtime))
+    monkeypatch.delenv("TYPESAFE_MODEL", raising=False)
+
+    loaded = load_env()
+
+    assert loaded == runtime / ".env"
+    assert __import__("os").environ["TYPESAFE_MODEL"] == "runtime-model"

@@ -119,6 +119,12 @@ browser pages. Ask Jev for one choice with:
 uv run brownie --predict --goal "Find the pricing page" https://example.com
 ```
 
+By default, Brownie reads `.env` and stores `artifacts/model-cooldowns.json`
+relative to the current working directory, not relative to the installed Python
+package. Set `BROWNIE_RUNTIME_DIR` to use one explicit private runtime directory
+for both paths. Set that variable in the shell or process environment because it
+must be known before Brownie can locate `.env`.
+
 Prediction mode sends the goal, visible page text, descriptive element fields,
 and offered operations to TypeSafe. It never sends Brownie's internal node IDs,
 never executes the answer, and does not invoke a text-generation model.
@@ -247,7 +253,8 @@ Fallback policy for both Gemini roles:
 - Cooldowns persist across CLI runs in ignored `artifacts/model-cooldowns.json`,
   containing hashed endpoint/key/model identities and expiry times only. Roles
   sharing the same endpoint and key share cooldowns. Different keys in one project
-  still share Google's quota, but this local cache cannot correlate them.
+  still share Google's quota, but this local cache cannot correlate them. File
+  locking uses the native Windows or Unix mechanism.
 - Authentication, invalid requests, network/server errors, refusals, truncated
   output, and invalid choices stop without fallback. If all models are unavailable,
   no action executes. Results record the answering model and attempted/skipped models.
