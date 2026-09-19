@@ -52,6 +52,24 @@ ten scrolls:
 uv run brownie --read-page --max-scrolls 10 https://example.com
 ```
 
+### Windows PowerShell
+
+The regular `uv` commands above use the same syntax in Windows PowerShell.
+Install `uv` and Google Chrome first, then run them from the repository directory:
+
+```powershell
+uv sync
+uv run brownie --headed https://example.com
+uv run python -m pytest
+```
+
+Bash examples in this README use `\` for line continuation. In PowerShell,
+put the command on one line or use PowerShell's backtick continuation character:
+
+```powershell
+uv run brownie --attach --use-open-tab --step --goal "Open the listing for the off-grid Iveco motorhome" https://marketplace.example/
+```
+
 The resulting `seen_elements` are a reading summary, not executable targets.
 Only elements in a fresh current-viewport observation may become targets in a
 later milestone.
@@ -81,6 +99,12 @@ Create Brownie's private environment file and add your TypeSafe key:
 
 ```bash
 cp .env.example .env
+```
+
+In Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
 ```
 
 ```dotenv
@@ -288,6 +312,19 @@ google-chrome --remote-debugging-address=127.0.0.1 \
   --remote-debugging-port=9222 \
   --user-data-dir="$PWD/.browser-profile-cdp"
 ```
+
+In Windows PowerShell, the equivalent for Chrome installed in its default
+system-wide location is:
+
+```powershell
+New-Item -ItemType Directory -Force .browser-profile-cdp | Out-Null
+$profile = (Resolve-Path .browser-profile-cdp).Path
+& "$env:ProgramFiles\Google\Chrome\Application\chrome.exe" --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 "--user-data-dir=$profile"
+```
+
+If Chrome is installed elsewhere, replace the executable path. Keep Brownie
+and the Chrome debugging session in the same operating-system environment;
+attaching from WSL to Windows Chrome is not a documented setup.
 
 In that Chrome window, open the site and complete its challenge, login, and MFA
 manually. Only after the destination works normally, attach Brownie from a
