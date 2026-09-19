@@ -11,15 +11,17 @@
   <body>
     <main>
       <h1>Find a quiet place</h1>
-      <label for="query">Destination</label>
-      <input id="query" type="search" value="Baku" />
+      <form onsubmit="event.preventDefault(); document.querySelector('#status').textContent = 'searched'">
+        <label for="query">Destination</label>
+        <input id="query" type="search" value="Baku" />
 
-      <label>
-        <input type="checkbox" checked />
-        Free cancellation
-      </label>
+        <label>
+          <input type="checkbox" checked />
+          Free cancellation
+        </label>
 
-      <button type="button" onclick="document.querySelector('#status').textContent = 'searched'">Find stays</button>
+        <button type="submit">Find stays</button>
+      </form>
       <a href="#details">Read details</a>
       <a href="delayed_fixture.html">Open delayed page</a>
       <output id="status">idle</output>

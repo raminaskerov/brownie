@@ -74,7 +74,28 @@
     const editable = !element.readOnly && element.getAttribute('aria-readonly') !== 'true' &&
       (['textbox', 'searchbox', 'spinbutton'].includes(role) ||
         (role === 'combobox' && ['INPUT', 'TEXTAREA'].includes(element.tagName)));
-    return editable ? ['CLICK', 'TYPE_TEXT'] : ['CLICK'];
+    if (!editable) return ['CLICK'];
+    return element.form ? ['CLICK', 'TYPE_TEXT', 'SUBMIT'] : ['CLICK', 'TYPE_TEXT'];
+  };
+  const destinationFor = element => {
+    if (element.tagName !== 'A' || !element.href) return '';
+    const destination = new URL(element.href, location.href);
+    return destination.origin === location.origin
+      ? `${destination.pathname}${destination.search}`
+      : `${destination.origin}${destination.pathname}`;
+  };
+  const contextFor = (element, name) => {
+    if (element.tagName !== 'A') return '';
+    const list = element.closest('ul,ol');
+    const numberedLinks = list
+      ? [...list.querySelectorAll('a[href]')].filter(link => /^\d+$/.test(accessibleName(link).trim()))
+      : [];
+    if (numberedLinks.length >= 2) return 'pagination';
+    const navigation = element.closest('nav,[role="navigation"]');
+    if (navigation) return (accessibleName(navigation) || 'navigation').slice(0, 180);
+    const container = element.closest('article,li,tr,[role="listitem"]');
+    const nearby = container?.innerText?.replace(/\s+/g, ' ').trim() || '';
+    return nearby && nearby !== name ? nearby.slice(0, 180) : '';
   };
 
   const elements = [];
@@ -84,13 +105,16 @@
     const rect = element.getBoundingClientRect();
     const role = roleOf(element);
     if (!role || !inViewport(rect)) continue;
+    const name = accessibleName(element) || role;
     elements.push({
       node_id: nodeId(element),
       role,
-      name: accessibleName(element) || role,
+      name,
       value: 'value' in element ? String(element.value) : '',
       checked: 'checked' in element ? Boolean(element.checked) : null,
       operations: operationsFor(element, role),
+      context: contextFor(element, name),
+      destination: destinationFor(element),
     });
   }
 

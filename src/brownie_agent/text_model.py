@@ -1,10 +1,8 @@
-"""OpenAI-compatible text helper used only after Jev selects TYPE_TEXT."""
+"""Gemini-compatible text helper used only after a steerer selects TYPE_TEXT."""
 
 import json
-import os
-import time
-import urllib.error
-import urllib.request
+
+from .chat_model import complete_chat, post_chat, response_object
 
 TEXT_VALUE = """Write only the exact value required for the selected field to advance the user's goal.
 Obey text_mode:
@@ -34,33 +32,11 @@ FIELD_VALUE_FORMAT = {
 }
 
 
-def post_chat(url: str, key: str, body: dict) -> dict:
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=25) as response:
-            return json.loads(response.read())
-    except urllib.error.HTTPError as error:
-        raise RuntimeError(f"Text model returned HTTP {error.code}; nothing typed.") from None
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        raise RuntimeError("Text model connection failed; nothing typed.") from None
-
-
 def generate_field_text(context: dict, *, post=post_chat) -> tuple[str, dict]:
     """Generate and strictly validate one selected field value."""
-    key = os.environ.get("TEXT_MODEL_API_KEY", "").strip()
-    if not key:
-        raise ValueError("TYPE_TEXT requires TEXT_MODEL_API_KEY; nothing typed.")
-    base_url = os.environ.get(
-        "TEXT_MODEL_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"
-    ).rstrip("/")
-    model = os.environ.get("TEXT_MODEL", "gemini-2.5-flash-lite")
+    if context.get("text_mode") == "VALUE_MISSING":
+        raise ValueError("Required field value is missing; nothing typed.")
     body = {
-        "model": model,
         "max_tokens": 256,
         "response_format": FIELD_VALUE_FORMAT,
         "messages": [
@@ -69,17 +45,12 @@ def generate_field_text(context: dict, *, post=post_chat) -> tuple[str, dict]:
         ],
     }
 
-    started = time.perf_counter()
-    result = post(base_url + "/chat/completions", key, body)
+    result, metadata = complete_chat("TEXT", body, post=post)
     try:
-        output = json.loads(result["choices"][0]["message"]["content"])
+        output = response_object(result)
         value = output["text"]
         if set(output) != {"text"} or not isinstance(value, str) or not value.strip() or len(value) > 2000:
             raise ValueError()
     except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         raise ValueError("Text model returned no valid field value; nothing typed.") from None
-    return value, {
-        "model": model,
-        "latency_ms": round((time.perf_counter() - started) * 1000),
-        "usage": result.get("usage", {}),
-    }
+    return value, metadata

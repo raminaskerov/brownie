@@ -2,7 +2,16 @@
 
 from urllib.parse import urlsplit, urlunsplit
 
-PUBLIC_ELEMENT_KEYS = ("index", "role", "name", "value", "checked", "operations")
+PUBLIC_ELEMENT_KEYS = (
+    "index",
+    "role",
+    "name",
+    "value",
+    "checked",
+    "operations",
+    "context",
+    "destination",
+)
 DECISION_HISTORY_KEYS = (
     "operation",
     "target_name",

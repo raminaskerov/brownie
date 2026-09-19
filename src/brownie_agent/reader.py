@@ -29,6 +29,8 @@ def _descriptive_element(element: dict, view: int) -> dict:
         "name": element["name"],
         "value": element.get("value", ""),
         "checked": element.get("checked"),
+        "context": element.get("context", ""),
+        "destination": element.get("destination", ""),
         "first_seen_view": view,
     }
 
@@ -66,6 +68,8 @@ def read_page(browser: ObservableBrowser, *, max_scrolls: int = 10) -> dict:
                 descriptive["name"],
                 descriptive["value"],
                 descriptive["checked"],
+                descriptive["context"],
+                descriptive["destination"],
             )
             seen_elements.setdefault(identity, descriptive)
 

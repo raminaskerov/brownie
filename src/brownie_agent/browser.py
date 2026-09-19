@@ -190,6 +190,17 @@ class BrowserSession:
             except Exception:
                 pass
 
+    def submit_node(self, node_id: int) -> None:
+        """Submit through one observed form-associated editable node once."""
+        element = self._element_handle(node_id)
+        try:
+            element.press("Enter", timeout=2_000)
+        finally:
+            try:
+                element.dispose()
+            except Exception:
+                pass
+
     def wait_for_page_ready(self, previous_url: str, *, timeout_ms: int = 3_000) -> bool:
         """Wait briefly for a click destination to expose observable content."""
         if self.page is None:

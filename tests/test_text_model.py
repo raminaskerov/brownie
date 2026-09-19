@@ -105,3 +105,10 @@ def test_generate_field_text_rejects_missing_or_non_exact_output(monkeypatch, co
 
     with pytest.raises(ValueError, match="nothing typed"):
         generate_field_text({"goal": "Missing value"}, post=fake_post)
+
+
+def test_missing_value_mode_stops_before_any_model_request():
+    with pytest.raises(ValueError, match="nothing typed"):
+        generate_field_text(
+            {"text_mode": "VALUE_MISSING"}, post=lambda *_: pytest.fail("Missing values must not call a model"),
+        )

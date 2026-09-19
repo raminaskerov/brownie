@@ -8,9 +8,9 @@ from .access import READY, classify_access, local_blocked_prediction
 from .actions import OPERATIONS, execute_action, execute_prediction
 from .browser import BrowserSession
 from .config import load_env
-from .model import predict_action
 from .reader import read_page
 from .state import text_field_state
+from .steering import steer_action
 from .text_model import generate_field_text
 
 
@@ -35,23 +35,27 @@ def parser() -> argparse.ArgumentParser:
     mode.add_argument("--scroll-down", action="store_true", help="Scroll down once before printing")
     mode.add_argument("--read-page", action="store_true", help="Read successive viewports with a hard limit")
     mode.add_argument("--action", choices=OPERATIONS, help="Execute exactly one manually selected operation")
-    mode.add_argument("--predict", action="store_true", help="Ask Jev for one choice without executing it")
-    mode.add_argument("--step", action="store_true", help="Ask Jev and execute at most one non-text action")
+    mode.add_argument("--predict", action="store_true", help="Ask the steerer for one choice without executing it")
+    mode.add_argument("--step", action="store_true", help="Ask the steerer and execute at most one action")
+    result.add_argument("--steerer", choices=("jev", "llm"), help="Action steering provider (default: jev)")
     mode.add_argument("--login", action="store_true", help="Open a headed browser for manual login preparation")
-    result.add_argument("--target", type=int, help="Current observed element index for CLICK or TYPE_TEXT")
+    result.add_argument("--target", type=int, help="Current observed element index for CLICK, TYPE_TEXT, or SUBMIT")
     result.add_argument("--text", help="Replacement field value for TYPE_TEXT")
-    result.add_argument("--goal", help="Natural-language goal for --predict")
+    result.add_argument("--goal", help="Natural-language goal for --predict or --step")
     result.add_argument("--env-file", type=Path, help="Environment file (default: Brownie's .env)")
     result.add_argument("--max-scrolls", type=int, default=10, help="Maximum scrolls for --read-page (default: 10)")
     result.add_argument("--json", action="store_true", help="Print the complete observation as JSON")
     return result
 
 
-def print_observation(observation: dict) -> None:
+def print_observation(observation: dict, *, heading: str = "Current snapshot") -> None:
+    print(f"{heading}: {observation['fingerprint'][:12]}")
     print(f"{observation['title']}\n{observation['url']}\n")
     for element in observation["elements"]:
         value = f" = {element['value']}" if element.get("value") else ""
-        print(f"[{element['index']}] {element['role']:<11} {element['name']}{value}")
+        context = f" · {element['context']}" if element.get("context") else ""
+        destination = f" · {element['destination']}" if element.get("destination") else ""
+        print(f"[{element['index']}] {element['role']:<11} {element['name']}{value}{context}{destination}")
     if observation["omitted_elements"]:
         print(f"\n... {observation['omitted_elements']} additional visible elements omitted")
     directions = []
@@ -79,9 +83,10 @@ def print_page_read(report: dict) -> None:
 def print_execution(result: dict) -> None:
     execution = result["execution"]
     target = f" [{execution['target']}] {execution['target_name']}" if execution["target"] else ""
+    print(f"Decision snapshot: {result['decision_fingerprint'][:12]}")
     print(f"Operation: {execution['operation']}{target}")
     print(f"Status: {execution['status']}\n")
-    print_observation(result["observation"])
+    print_observation(result["observation"], heading="After-action snapshot")
 
 
 def print_prediction(result: dict) -> None:
@@ -89,30 +94,45 @@ def print_prediction(result: dict) -> None:
     target = f" [{prediction['target']}] {prediction['target_name']}" if prediction["target"] else ""
     print("Prediction only — nothing executed")
     print(f"Operation: {prediction['operation']}{target}")
+    print_steering_details(prediction)
+    print_observation(result["observation"], heading="Prediction snapshot")
+
+
+def print_steering_details(prediction: dict) -> None:
+    """Show shared fields and optional provider diagnostics without requiring probabilities."""
+    print(f"Steering source: {prediction.get('source', 'unknown')}")
     if prediction.get("source") == "local_access_guard":
-        print(f"Local access guard: {prediction['blocked_reason']} — Jev was not called\n")
-    else:
+        print(f"Local access guard: {prediction['blocked_reason']} — no steering provider was called")
+    if prediction.get("routing"):
+        print(f"Routing: {prediction['routing']['reason']}")
+    if prediction.get("confidence") is not None:
         print(f"Confidence: {prediction['confidence']:.3f}")
-        print(f"Model: {prediction['model']} · {prediction['latency_ms']} ms\n")
+    if prediction.get("model") is not None:
+        print(f"Model: {prediction['model']}")
+    if prediction.get("latency_ms") is not None:
+        print(f"Latency: {prediction['latency_ms']} ms")
+    for attempt in prediction.get("model_attempts", []):
+        print(f"Model attempt: {attempt['model']} — {attempt['status']}")
     if prediction.get("text_mode"):
-        print(f"Text mode: {prediction['text_mode']} ({prediction['text_mode_confidence']:.3f})\n")
-    print_observation(result["observation"])
+        confidence = prediction.get("text_mode_confidence")
+        suffix = f" ({confidence:.3f})" if confidence is not None else ""
+        print(f"Text mode: {prediction['text_mode']}{suffix}")
 
 
 def print_step(result: dict) -> None:
     prediction = result["prediction"]
     execution = result["execution"]
     target = f" [{prediction['target']}] {prediction['target_name']}" if prediction["target"] else ""
-    print(f"Jev choice: {prediction['operation']}{target}")
-    if prediction.get("source") == "local_access_guard":
-        print(f"Local access guard: {prediction['blocked_reason']} — Jev was not called")
-    else:
-        print(f"Confidence: {prediction['confidence']:.3f}")
-        print(f"Model: {prediction['model']} · {prediction['latency_ms']} ms")
-    if prediction.get("text_mode"):
-        print(f"Text mode: {prediction['text_mode']} ({prediction['text_mode_confidence']:.3f})")
+    print(f"Decision snapshot: {result['decision_fingerprint'][:12]}")
+    print(f"Steering choice ({prediction.get('source', 'unknown')}): {prediction['operation']}{target}")
+    print_steering_details(prediction)
     print(f"Execution: {execution['status']}\n")
-    print_observation(result["observation"])
+    if execution.get("text_model"):
+        metadata = execution["text_model"]
+        print(f"Text model: {metadata['model']}")
+        for attempt in metadata.get("model_attempts", []):
+            print(f"Text model attempt: {attempt['model']} — {attempt['status']}")
+    print_observation(result["observation"], heading="After-action snapshot")
 
 
 def print_login(result: dict) -> None:
@@ -134,6 +154,8 @@ def main() -> None:
         argument_parser.error("--goal is currently used only with --predict or --step")
     if args.use_open_tab and not args.attach:
         argument_parser.error("--use-open-tab requires --attach")
+    if args.steerer and not (args.predict or args.step):
+        argument_parser.error("--steerer requires --predict or --step")
     if args.predict or args.step:
         load_env(args.env_file)
     with BrowserSession(
@@ -159,7 +181,7 @@ def main() -> None:
             if args.predict or args.step:
                 access = classify_access(result)
                 prediction = (
-                    predict_action(result, args.goal)
+                    steer_action(result, args.goal, provider=args.steerer)
                     if access["status"] == READY
                     else local_blocked_prediction(access)
                 )
@@ -185,11 +207,12 @@ def main() -> None:
                         execution["text_model"] = text_metadata
                     else:
                         execution = execute_prediction(browser, result, prediction)
-                    if execution["executed"] and execution["operation"] == "CLICK":
+                    if execution["executed"] and execution["operation"] in {"CLICK", "SUBMIT"}:
                         execution["page_ready"] = browser.wait_for_page_ready(result["url"])
                     result = {
                         "prediction": prediction,
                         "execution": execution,
+                        "decision_fingerprint": result["fingerprint"],
                         "observation": browser.observe(),
                     }
                 else:
@@ -202,9 +225,13 @@ def main() -> None:
                     target=args.target,
                     text=args.text,
                 )
-                if execution["executed"] and args.action == "CLICK":
+                if execution["executed"] and args.action in {"CLICK", "SUBMIT"}:
                     execution["page_ready"] = browser.wait_for_page_ready(result["url"])
-                result = {"execution": execution, "observation": browser.observe()}
+                result = {
+                    "execution": execution,
+                    "decision_fingerprint": result["fingerprint"],
+                    "observation": browser.observe(),
+                }
             elif args.scroll_down and result["can_scroll_down"]:
                 browser.scroll_down()
                 result = browser.observe()

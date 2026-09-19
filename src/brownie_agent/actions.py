@@ -1,7 +1,17 @@
 """Validated one-operation execution against a fresh viewport observation."""
 
-OPERATIONS = ("SCROLL_DOWN", "SCROLL_UP", "CLICK", "TYPE_TEXT", "DONE", "BLOCKED")
-TARGETED_OPERATIONS = {"CLICK", "TYPE_TEXT"}
+OPERATIONS = ("SCROLL_DOWN", "SCROLL_UP", "CLICK", "TYPE_TEXT", "SUBMIT", "DONE", "BLOCKED")
+TARGETED_OPERATIONS = {"CLICK", "TYPE_TEXT", "SUBMIT"}
+
+
+def element_description(element: dict) -> str:
+    """Describe one observed target without relying on its temporary index."""
+    parts = [element["name"]]
+    if element.get("context") and element["context"].casefold() != element["name"].casefold():
+        parts.append(element["context"])
+    if element.get("destination"):
+        parts.append(element["destination"])
+    return " · ".join(parts)
 
 
 class StaleObservation(ValueError):
@@ -72,20 +82,23 @@ def execute_action(
     elif operation == "TYPE_TEXT":
         browser.type_node(element["node_id"], text)
         executed = True
+    elif operation == "SUBMIT":
+        browser.submit_node(element["node_id"])
+        executed = True
     else:
         executed = False
 
     return {
         "operation": operation,
         "target": target,
-        "target_name": element["name"] if element else None,
+        "target_name": element_description(element) if element else None,
         "executed": executed,
         "status": operation.lower() if operation in {"DONE", "BLOCKED"} else "executed",
     }
 
 
 def execute_prediction(browser, observation: dict, prediction: dict) -> dict:
-    """Execute one validated Jev choice, stopping before text generation."""
+    """Execute one validated steering choice, stopping before text generation."""
     operation = prediction.get("operation")
     target = prediction.get("target")
     if operation == "TYPE_TEXT":

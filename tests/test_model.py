@@ -142,6 +142,41 @@ def test_predict_action_returns_mode_for_selected_text_field(monkeypatch):
     assert "text_mode_2" not in captured["questions"]
 
 
+def test_predict_action_can_select_submit_for_a_form_field(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
+    state = observation()
+    state["elements"][0]["operations"].append("SUBMIT")
+
+    def fake_post(_url, _key, _body):
+        return {
+            "model": "jev-test",
+            "answers": {
+                "operation": {
+                    "choice": "SUBMIT",
+                    "probabilities": {
+                        "CLICK": 0.05,
+                        "TYPE_TEXT": 0.05,
+                        "SUBMIT": 0.8,
+                        "DONE": 0.05,
+                        "BLOCKED": 0.05,
+                    },
+                    "confidence": 0.8,
+                },
+                "submit_target": {
+                    "choice": "1",
+                    "probabilities": {"1": 1.0},
+                    "confidence": 1.0,
+                },
+            },
+        }
+
+    prediction = predict_action(observation=state, goal="Submit the completed search", post=fake_post)
+
+    assert prediction["operation"] == "SUBMIT"
+    assert prediction["target"] == 1
+    assert prediction["target_name"] == "Destination"
+
+
 def test_load_env_does_not_replace_existing_process_value(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text("TYPESAFE_API_KEY=file-key\nTYPESAFE_MODEL=jev-test\n")
