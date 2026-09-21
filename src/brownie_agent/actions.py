@@ -1,5 +1,7 @@
 """Validated one-operation execution against a fresh viewport observation."""
 
+from .trace import trace_event
+
 OPERATIONS = ("SCROLL_DOWN", "SCROLL_UP", "CLICK", "TYPE_TEXT", "SUBMIT", "DONE", "BLOCKED")
 TARGETED_OPERATIONS = {"CLICK", "TYPE_TEXT", "SUBMIT"}
 
@@ -69,6 +71,15 @@ def execute_action(
     operation = operation.upper()
     element = _validate(operation, target, text, observation)
     current = browser.observe()
+    trace_event("execution_check", {
+        "operation": operation,
+        "target": target,
+        "target_name": element_description(element) if element else None,
+        "text": text,
+        "decision_fingerprint": observation["fingerprint"],
+        "current_fingerprint": current["fingerprint"],
+        "available_action_space": action_space(current),
+    })
     if current["fingerprint"] != observation["fingerprint"]:
         raise StaleObservation("The page changed after observation; observe again before acting.")
 
@@ -88,13 +99,15 @@ def execute_action(
     else:
         executed = False
 
-    return {
+    result = {
         "operation": operation,
         "target": target,
         "target_name": element_description(element) if element else None,
         "executed": executed,
         "status": operation.lower() if operation in {"DONE", "BLOCKED"} else "executed",
     }
+    trace_event("execution_result", {"result": result})
+    return result
 
 
 def execute_prediction(browser, observation: dict, prediction: dict) -> dict:

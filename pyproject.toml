@@ -10,6 +10,7 @@ dependencies = [
 
 [project.scripts]
 brownie = "brownie_agent.cli:main"
+brownie-ui = "brownie_agent.ui:main"
 
 [build-system]
 requires = ["hatchling"]

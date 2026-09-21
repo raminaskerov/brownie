@@ -16,6 +16,7 @@ from .search import run_search
 from .state import text_field_state
 from .steering import steer_action
 from .text_model import generate_field_text
+from .trace import TraceRecorder, trace_event
 
 
 def parser() -> argparse.ArgumentParser:
@@ -72,6 +73,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--max-steps", type=int, default=8, help="Maximum browser actions for --search (default: 8)")
     result.add_argument("--max-pages", type=int, default=3, help="Maximum distinct pages for --search (default: 3)")
     result.add_argument("--json", action="store_true", help="Print the complete observation as JSON")
+    result.add_argument(
+        "--trace",
+        type=Path,
+        help="Write an exact private JSONL trace and a text-only HTML inspector",
+    )
     return result
 
 
@@ -210,6 +216,16 @@ def main() -> None:
     profile_dir = args.profile or Path(".browser-profile-cdp" if args.managed_cdp else ".browser-profile")
     cdp_url = args.cdp_endpoint if args.attach or args.managed_cdp else None
     with ExitStack() as stack:
+        recorder = stack.enter_context(TraceRecorder(args.trace)) if args.trace else None
+        trace_event("run", {
+            "mode": next((name for name in ("search", "step", "predict", "read_page", "action", "login")
+                          if getattr(args, name, False)), "observe"),
+            "goal": args.goal,
+            "url": args.url,
+            "provider": args.steerer or "jev",
+            "managed_cdp": args.managed_cdp,
+            "budgets": {"max_steps": args.max_steps, "max_pages": args.max_pages, "max_scrolls": args.max_scrolls},
+        })
         if args.managed_cdp:
             stack.enter_context(
                 ManagedChrome(
@@ -309,6 +325,7 @@ def main() -> None:
             elif args.scroll_down and result["can_scroll_down"]:
                 browser.scroll_down()
                 result = browser.observe()
+        trace_event("run_result", {"result": result})
         if args.keep_open and not args.login:
             print("Brownie finished. Press Enter to close its browser.", file=sys.stderr)
             try:
@@ -331,6 +348,8 @@ def main() -> None:
         print_login(result)
     else:
         print_observation(result)
+    if recorder is not None:
+        print(f"Trace: {recorder.path}\nInspector: {recorder.html_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":

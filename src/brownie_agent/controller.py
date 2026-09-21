@@ -47,8 +47,8 @@ class RunState:
         self.goal = self.goal.strip()
         if not self.goal:
             raise ValueError("A run requires a non-empty goal.")
-        if min(self.max_steps, self.max_pages, self.max_scrolls_per_page) < 1:
-            raise ValueError("Run budgets must be positive integers.")
+        if min(self.max_steps, self.max_pages) < 1 or self.max_scrolls_per_page < 0:
+            raise ValueError("Step and page budgets must be positive; the scroll budget may be zero.")
 
     def observe(self, observation: dict) -> None:
         """Remember one factual viewport without retaining executable node references."""

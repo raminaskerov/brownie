@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from .access import READY, classify_access, local_blocked_prediction
 from .actions import TARGETED_OPERATIONS, action_space, element_description
 from .state import decision_state, public_element
+from .trace import trace_event
 
 TEXT_MODES = frozenset({"SEARCH_SEED", "FIELD_VALUE", "IDENTIFIER", "FREEFORM", "VALUE_MISSING"})
 Steerer = Callable[[dict, str, Iterable[dict]], dict]
@@ -112,6 +113,12 @@ def steer_action(
         from .model import predict_action
 
         providers = {"jev": predict_action, "llm": predict_llm_action}
+    trace_event("steering_context", {
+        "route": {"provider": route.provider, "reason": route.reason},
+        "observer_output": snapshot,
+        "provider_input": state,
+        "action_space": action_space(snapshot),
+    })
     try:
         steerer = providers[route.provider]
     except KeyError:
@@ -120,4 +127,5 @@ def steer_action(
     choice = steerer(public_observation, goal, deepcopy(state["recent_steps"]))
     validated = validate_steering_choice(snapshot, choice, source=route.provider)
     validated["routing"] = {"provider": route.provider, "reason": route.reason}
+    trace_event("steering_result", {"choice": validated})
     return validated

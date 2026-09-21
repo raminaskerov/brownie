@@ -10,6 +10,7 @@ from .reader import read_page
 from .state import text_field_state
 from .steering import steer_action
 from .text_model import generate_field_text
+from .trace import trace_event
 
 SEARCH_ENGINE_URL = "https://duckduckgo.com/"
 SEARCH_ENGINE_DOMAIN = "duckduckgo.com"
@@ -106,6 +107,10 @@ def run_search(
         if reason := state.budget_stop_reason():
             return _stop_result(state, observation, reason=reason, query=query)
 
+        trace_event("controller_memory", {
+            "sent_to_provider": state.recent_steps(),
+            "stored_not_sent": state.memory_state(),
+        })
         prediction = choose_action(
             observation,
             objective,

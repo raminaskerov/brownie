@@ -54,6 +54,52 @@ contains up to five exact source lines ranked locally by overlap with the goal.
 It does not send source material to another model or claim semantic relevance or
 sufficiency.
 
+### Inspect what Brownie sent and received
+
+Add an opt-in trace to any run:
+
+```bash
+./.venv/bin/brownie --managed-cdp --search --max-scrolls 0 --steerer jev \
+  --trace artifacts/last-run.jsonl --goal "Find the official Python pathlib documentation"
+```
+
+Brownie writes the exact local events to `artifacts/last-run.jsonl` and a
+text-only companion interface to `artifacts/last-run.html`. The interface shows
+the observer output, the smaller factual state and recent-step memory actually
+sent to the provider, the offered actions, exact request body without credentials,
+raw response, Jev probability tables, parsed choice, freshness check, execution,
+and deterministic source-reading viewports. It also separates controller memory
+that was stored locally but not sent to either provider.
+
+Tracing makes no additional model calls and includes no screenshots. It is off
+by default because the files can contain sensitive page text, URLs, and entered
+field values. `artifacts/` is ignored by Git.
+
+### Local control room
+
+Start Brownie's private local interface from the repository directory:
+
+```bash
+./.venv/bin/python -m brownie_agent.ui
+```
+
+After the next `uv sync`, the shorter `./.venv/bin/brownie-ui` entry point is
+also available.
+
+It opens `http://127.0.0.1:8766/` and provides one place to choose the current
+task, Chrome start mode, Jev or LLM steering, limits, and whether Brownie's owned
+Chrome stays open after the task. It shows a compact decision timeline, Brownie's
+final grounded result, process errors, and the live `artifacts/last-run.html`
+inspector. Use **Close Brownie browser** when a finished managed or Playwright
+window should close.
+
+The control room accepts one run at a time, binds only to localhost, and does not
+offer a free-form command field. It invokes the same CLI, observer, freshness
+checks, action validation, and executor as terminal runs. **Stop run** interrupts
+the CLI so its browser context can clean up; it does not retry the current action.
+The inspector and final reply make no additional model calls. They can contain
+private page text, URLs, and typed values because the normal opt-in trace is used.
+
 ## Setup
 
 From this directory:

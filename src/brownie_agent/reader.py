@@ -3,6 +3,8 @@
 from collections.abc import Iterable
 from typing import Protocol
 
+from .trace import trace_event
+
 
 class ObservableBrowser(Protocol):
     def observe(self) -> dict: ...
@@ -48,6 +50,7 @@ def read_page(browser: ObservableBrowser, *, max_scrolls: int = 10) -> dict:
 
     while True:
         observation = browser.observe()
+        trace_event("page_read_view", {"observation": observation})
         view_key = (
             observation["url"],
             observation["viewport"]["scroll_y"],
@@ -85,7 +88,7 @@ def read_page(browser: ObservableBrowser, *, max_scrolls: int = 10) -> dict:
         scrolls += 1
 
     first = views[0]
-    return {
+    result = {
         "url": first["url"],
         "title": first["title"],
         "combined_text": _unique_lines(view["text"] for view in views),
@@ -94,3 +97,5 @@ def read_page(browser: ObservableBrowser, *, max_scrolls: int = 10) -> dict:
         "scrolls": scrolls,
         "stop_reason": stop_reason,
     }
+    trace_event("page_read_result", {"result": result})
+    return result

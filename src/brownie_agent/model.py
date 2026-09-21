@@ -9,6 +9,7 @@ import urllib.request
 
 from .actions import action_space, element_description
 from .state import decision_state, public_element
+from .trace import trace_event
 
 API_URL = "https://api.typesafe.ai/v1/systemone"
 
@@ -145,8 +146,15 @@ def predict_action(observation: dict, goal: str, recent_steps=(), *, post=post_j
         "state": decision_state(observation, goal, recent_steps),
         "questions": questions,
     }
+    trace_event("model_request", {
+        "provider": "jev", "role": "steering", "model": body["model"], "body": body,
+    })
     started = time.perf_counter()
     result = post(API_URL, key, body)
+    trace_event("model_response", {
+        "provider": "jev", "role": "steering", "model": result.get("model", body["model"]),
+        "response": result,
+    })
     answers = result.get("answers", {})
     operation_answer = validate_choice(answers.get("operation", {}), operation_criteria)
     operation = operation_answer["choice"]

@@ -14,6 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import runtime_root
+from .trace import trace_event
 
 if os.name == "nt":
     import msvcrt
@@ -203,9 +204,14 @@ def complete_chat(role: str, body: dict, *, post=post_chat, cooldowns=None, cloc
         until = cooldowns.access(identity(model), now)
         if until > now:
             attempts.append({"model": model, "status": "cooldown", "retry_after_seconds": math.ceil(until - now)})
+            trace_event("model_attempt", {"provider": "llm", "role": role.lower(), **attempts[-1]})
             continue
+        request_body = {**body, "model": model}
+        trace_event("model_request", {
+            "provider": "llm", "role": role.lower(), "model": model, "body": request_body,
+        })
         try:
-            result = post(url, key, {**body, "model": model})
+            result = post(url, key, request_body)
         except ModelHTTPError as error:
             if error.status != 429:
                 raise
@@ -216,9 +222,13 @@ def complete_chat(role: str, body: dict, *, post=post_chat, cooldowns=None, cloc
                     "HTTP 429 quota is shared or unclassified; model fallback stopped; no browser action executed."
                 ) from None
             attempts.append({"model": model, "status": "rate_limited", "retry_after_seconds": math.ceil(delay)})
+            trace_event("model_attempt", {"provider": "llm", "role": role.lower(), **attempts[-1]})
             continue
         if not isinstance(result, dict):
             raise ValueError("Model returned an invalid response; no browser action executed.")
+        trace_event("model_response", {
+            "provider": "llm", "role": role.lower(), "model": model, "response": result,
+        })
         attempts.append({"model": model, "status": "answered"})
         return result, {
             "model": model,

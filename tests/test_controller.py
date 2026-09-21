@@ -91,6 +91,13 @@ def test_no_effect_and_budgets_stop_without_model_judgment():
     assert scroll_limited.record_step(unchanged, execution("SCROLL_DOWN"), changed) == "scroll_budget"
 
 
+def test_zero_scroll_budget_allows_a_run_but_rejects_scroll_actions():
+    state = RunState("Open one result without reading down the page", max_scrolls_per_page=0)
+    current = observation("https://example.test/", "top")
+
+    assert state.preflight({"operation": "SCROLL_DOWN"}, current) == "scroll_budget"
+
+
 def test_page_budget_counts_distinct_query_pages_but_not_fragments():
     state = RunState("Compare listings", max_pages=1)
     first = observation("https://example.test/results?q=gpu#top", "first")
