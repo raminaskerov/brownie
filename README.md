@@ -3,7 +3,7 @@
 Brownie is a small, occasional browser runner. It is being built in narrow
 steps so the browser boundary stays understandable.
 
-## Current milestone: one provider-selected action
+## Current milestone: bounded actions and one-source search
 
 Brownie can:
 
@@ -17,10 +17,42 @@ Brownie can:
 - ask Jev for one validated operation and target without executing it; and
 - execute one Jev-selected action, using a text helper only for `TYPE_TEXT`; and
 - alternatively use a Gemini-compatible LLM to select the same bounded action; and
-- prepare a persistent logged-in browser profile through a manual headed session.
+- prepare a persistent logged-in browser profile through a manual headed session; and
+- take a goal without a URL, search DuckDuckGo, open one selected external source,
+  read its page material, and stop.
 
 It does not use Browser Harness or connect to the user's normal Chrome
 session. Brownie owns its page observer and can evolve independently.
+
+## One bounded web search
+
+Give Brownie a research goal without supplying a URL:
+
+```bash
+./.venv/bin/brownie --managed-cdp --search --keep-open --steerer llm \
+  --goal "Find the official eligibility requirements for the Erasmus Mundus scholarship"
+```
+
+`--keep-open` leaves Brownie's owned headed browser visible after the search
+finishes. Return to the terminal and press Enter when you want Brownie to close
+it. Without this flag, the browser closes when the command completes.
+
+With `--managed-cdp`, Brownie starts ordinary headed Chrome with its dedicated
+`.browser-profile-cdp/`, attaches through localhost, opens the code-owned
+DuckDuckGo start page, and uses the same validated one-action boundary for every
+step. It stops after opening and reading one external source. The default limits
+are eight browser actions, three distinct pages, and ten source-page scrolls;
+use `--max-steps`, `--max-pages`, and `--max-scrolls` to lower them. Omit
+`--managed-cdp` only when you deliberately want the original Playwright-launched
+`.browser-profile/` mode.
+
+This first search milestone does not compare sources, go back, reformulate a
+query, synthesize an answer, log in, or bypass a challenge. Its returned
+`source.material` is page text grounded in the selected URL; relevance still
+depends on the steering model's result choice. `source.evidence_candidates`
+contains up to five exact source lines ranked locally by overlap with the goal.
+It does not send source material to another model or claim semantic relevance or
+sufficiency.
 
 ## Setup
 
@@ -30,6 +62,25 @@ From this directory:
 uv sync
 uv run brownie https://example.com
 ```
+
+If `uv` resolves to `/snap/bin/uv` and Snap refuses to start because its AppArmor
+service is unavailable, that failure occurs before Brownie or Chrome starts. Do
+not disable Chrome's security sandbox. After the environment has already been
+created with `uv sync`, invoke Brownie directly instead:
+
+```bash
+./.venv/bin/brownie --search --steerer jev --goal "Find the official Python pathlib documentation"
+```
+
+In Windows PowerShell, use `.venv\Scripts\brownie.exe` in place of
+`./.venv/bin/brownie`.
+
+Brownie's default mode uses Playwright to launch an isolated profile even if
+another Chrome window is already running. For sites that distinguish that launch
+from ordinary Chrome, `--managed-cdp` makes Brownie start ordinary headed Chrome
+itself and then attach through localhost. An existing ordinary Chrome session
+still cannot be attached after the fact unless it was started with remote
+debugging enabled.
 
 Use `--headed` to see the browser window. Brownie stores browser state in
 `.browser-profile/`, which is ignored by Git:
@@ -309,6 +360,31 @@ challenges. If manual verification keeps looping, stop the run and use the
 attach mode below.
 
 ## Attach to user-launched Chrome
+
+### Brownie-managed Chrome (recommended for search)
+
+Let Brownie perform the same launch-and-attach sequence automatically:
+
+```bash
+./.venv/bin/brownie --managed-cdp --search --keep-open --steerer jev \
+  --goal "Find the official Python pathlib documentation"
+```
+
+This starts ordinary headed Chrome with only the local debugging address, port,
+and dedicated profile arguments, waits for it to become ready, then attaches
+Playwright. Brownie uses `.browser-profile-cdp/` by default in this mode. It
+disconnects and closes only the Chrome process it started when the run ends;
+`--keep-open` waits for Enter first. If port 9222 already belongs to a debugging
+session, Brownie stops and tells you to use `--attach` rather than silently taking
+over that browser. Use `--chrome-executable /full/path/to/chrome` if automatic
+Chrome discovery fails. A separately running normal Chrome is not reused or
+closed; managed mode opens its own window and dedicated profile.
+
+Managed CDP removes Playwright's browser-launch defaults; it does not make the
+session undetectable, bypass a challenge, or guarantee that a site will preserve
+access. The observer and actions are still browser automation after attachment.
+
+### Manual launch and attach
 
 For challenge-protected sites, launch Chrome yourself with a dedicated profile
 and a debugging endpoint bound to the local machine:

@@ -128,6 +128,8 @@ class BrowserSession:
         """Scroll down once by 80% of the viewport; return whether the page moved."""
         if self.page is None:
             raise RuntimeError("Start BrowserSession with a `with` block before scrolling.")
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
         position = self.page.evaluate(
             """() => ({
                 before: scrollY,
@@ -138,13 +140,18 @@ class BrowserSession:
         if not position["canScroll"]:
             return False
         self.page.mouse.wheel(0, position["distance"])
-        self.page.wait_for_function("before => scrollY > before", arg=position["before"], timeout=2_000)
+        try:
+            self.page.wait_for_function("before => scrollY > before", arg=position["before"], timeout=2_000)
+        except PlaywrightTimeoutError:
+            return False
         return True
 
     def scroll_up(self) -> bool:
         """Scroll up once by 80% of the viewport; return whether the page moved."""
         if self.page is None:
             raise RuntimeError("Start BrowserSession with a `with` block before scrolling.")
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
         position = self.page.evaluate(
             """() => ({
                 before: scrollY,
@@ -155,7 +162,10 @@ class BrowserSession:
         if not position["canScroll"]:
             return False
         self.page.mouse.wheel(0, -position["distance"])
-        self.page.wait_for_function("before => scrollY < before", arg=position["before"], timeout=2_000)
+        try:
+            self.page.wait_for_function("before => scrollY < before", arg=position["before"], timeout=2_000)
+        except PlaywrightTimeoutError:
+            return False
         return True
 
     def _element_handle(self, node_id: int):

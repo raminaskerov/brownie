@@ -2,13 +2,17 @@
 
 import argparse
 import json
+import sys
+from contextlib import ExitStack
 from pathlib import Path
 
 from .access import READY, classify_access, local_blocked_prediction
 from .actions import OPERATIONS, execute_action, execute_prediction
 from .browser import BrowserSession
 from .config import load_env
+from .managed_chrome import ManagedChrome
 from .reader import read_page
+from .search import run_search
 from .state import text_field_state
 from .steering import steer_action
 from .text_model import generate_field_text
@@ -16,11 +20,30 @@ from .text_model import generate_field_text
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Open one page and list its visible controls.")
-    result.add_argument("url", help="Page to open, including https://")
+    result.add_argument("url", nargs="?", help="Page to open, including https://")
     result.add_argument("--headed", action="store_true", help="Show the isolated browser window")
-    result.add_argument("--profile", type=Path, default=Path(".browser-profile"), help="Dedicated profile directory")
+    result.add_argument(
+        "--keep-open",
+        action="store_true",
+        help="Keep Brownie's browser open after completion until Enter is pressed",
+    )
+    result.add_argument(
+        "--profile",
+        type=Path,
+        help="Dedicated profile directory (default: .browser-profile or .browser-profile-cdp)",
+    )
     result.add_argument("--channel", default="chrome", help="Installed Chromium channel (default: chrome)")
-    result.add_argument("--attach", action="store_true", help="Attach to a user-launched Chrome debugging session")
+    browser_mode = result.add_mutually_exclusive_group()
+    browser_mode.add_argument(
+        "--attach",
+        action="store_true",
+        help="Attach to a user-launched Chrome debugging session",
+    )
+    browser_mode.add_argument(
+        "--managed-cdp",
+        action="store_true",
+        help="Start ordinary headed Chrome, then attach through a private localhost CDP endpoint",
+    )
     result.add_argument(
         "--use-open-tab",
         action="store_true",
@@ -29,21 +52,25 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--cdp-endpoint",
         default="http://127.0.0.1:9222",
-        help="Chrome debugging endpoint for --attach (default: http://127.0.0.1:9222)",
+        help="Chrome debugging endpoint for --attach or --managed-cdp (default: http://127.0.0.1:9222)",
     )
+    result.add_argument("--chrome-executable", type=Path, help="Chrome executable for --managed-cdp")
     mode = result.add_mutually_exclusive_group()
     mode.add_argument("--scroll-down", action="store_true", help="Scroll down once before printing")
     mode.add_argument("--read-page", action="store_true", help="Read successive viewports with a hard limit")
     mode.add_argument("--action", choices=OPERATIONS, help="Execute exactly one manually selected operation")
     mode.add_argument("--predict", action="store_true", help="Ask the steerer for one choice without executing it")
     mode.add_argument("--step", action="store_true", help="Ask the steerer and execute at most one action")
+    mode.add_argument("--search", action="store_true", help="Search the web, open one source, read it, and stop")
     result.add_argument("--steerer", choices=("jev", "llm"), help="Action steering provider (default: jev)")
     mode.add_argument("--login", action="store_true", help="Open a headed browser for manual login preparation")
     result.add_argument("--target", type=int, help="Current observed element index for CLICK, TYPE_TEXT, or SUBMIT")
     result.add_argument("--text", help="Replacement field value for TYPE_TEXT")
-    result.add_argument("--goal", help="Natural-language goal for --predict or --step")
+    result.add_argument("--goal", help="Natural-language goal for --predict, --step, or --search")
     result.add_argument("--env-file", type=Path, help="Environment file (default: Brownie's .env)")
     result.add_argument("--max-scrolls", type=int, default=10, help="Maximum scrolls for --read-page (default: 10)")
+    result.add_argument("--max-steps", type=int, default=8, help="Maximum browser actions for --search (default: 8)")
+    result.add_argument("--max-pages", type=int, default=3, help="Maximum distinct pages for --search (default: 3)")
     result.add_argument("--json", action="store_true", help="Print the complete observation as JSON")
     return result
 
@@ -145,27 +172,74 @@ def print_login(result: dict) -> None:
     print_observation(result["observation"])
 
 
+def print_search(result: dict) -> None:
+    print(f"Search status: {result['status']} ({result['stop_reason']})")
+    if result.get("search_query"):
+        print(f"Query: {result['search_query']}")
+    source = result.get("source")
+    if source is None:
+        page = result["last_page"]
+        print(f"Stopped at: {page['title']}\n{page['url']}")
+        return
+    print(f"Source: {source['title']}\n{source['url']}")
+    print(f"Read with {source['scrolls']} scroll(s); stopped: {source['stop_reason']}\n")
+    print(source["material"])
+
+
 def main() -> None:
     argument_parser = parser()
     args = argument_parser.parse_args()
-    if (args.predict or args.step) and not args.goal:
-        argument_parser.error("--predict and --step require --goal")
-    if args.goal and not (args.predict or args.step):
-        argument_parser.error("--goal is currently used only with --predict or --step")
+    if (args.predict or args.step or args.search) and not args.goal:
+        argument_parser.error("--predict, --step, and --search require --goal")
+    if args.goal and not (args.predict or args.step or args.search):
+        argument_parser.error("--goal is currently used only with --predict, --step, or --search")
+    if args.search and args.url:
+        argument_parser.error("--search chooses its own search-engine URL; do not supply a URL")
+    if not args.search and not args.url:
+        argument_parser.error("a URL is required unless --search is used")
+    if args.search and args.attach:
+        argument_parser.error("--search cannot use a user-owned --attach session; use --managed-cdp instead")
     if args.use_open_tab and not args.attach:
         argument_parser.error("--use-open-tab requires --attach")
-    if args.steerer and not (args.predict or args.step):
-        argument_parser.error("--steerer requires --predict or --step")
-    if args.predict or args.step:
+    if args.chrome_executable and not args.managed_cdp:
+        argument_parser.error("--chrome-executable requires --managed-cdp")
+    if args.steerer and not (args.predict or args.step or args.search):
+        argument_parser.error("--steerer requires --predict, --step, or --search")
+    if args.predict or args.step or args.search:
         load_env(args.env_file)
-    with BrowserSession(
-        profile_dir=args.profile,
-        headed=args.headed or args.login,
-        channel=args.channel,
-        cdp_url=args.cdp_endpoint if args.attach else None,
-    ) as browser:
-        browser.open(args.url, use_open_tab=args.use_open_tab)
-        if args.login:
+    profile_dir = args.profile or Path(".browser-profile-cdp" if args.managed_cdp else ".browser-profile")
+    cdp_url = args.cdp_endpoint if args.attach or args.managed_cdp else None
+    with ExitStack() as stack:
+        if args.managed_cdp:
+            stack.enter_context(
+                ManagedChrome(
+                    profile_dir=profile_dir,
+                    endpoint=args.cdp_endpoint,
+                    executable=args.chrome_executable,
+                )
+            )
+        browser = stack.enter_context(
+            BrowserSession(
+                profile_dir=profile_dir,
+                headed=args.headed or args.login or args.search or args.keep_open,
+                channel=args.channel,
+                cdp_url=cdp_url,
+            )
+        )
+        if args.search:
+            result = run_search(
+                browser,
+                args.goal,
+                provider=args.steerer,
+                max_steps=args.max_steps,
+                max_pages=args.max_pages,
+                max_scrolls=args.max_scrolls,
+            )
+        else:
+            browser.open(args.url, use_open_tab=args.use_open_tab)
+        if args.search:
+            pass
+        elif args.login:
             print("Complete login or the human challenge in the browser window.")
             print("Do not close the browser. Return here and press Enter when the destination page is ready.")
             try:
@@ -235,8 +309,16 @@ def main() -> None:
             elif args.scroll_down and result["can_scroll_down"]:
                 browser.scroll_down()
                 result = browser.observe()
+        if args.keep_open and not args.login:
+            print("Brownie finished. Press Enter to close its browser.", file=sys.stderr)
+            try:
+                input()
+            except EOFError:
+                raise RuntimeError("--keep-open requires an interactive terminal") from None
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
+    elif args.search:
+        print_search(result)
     elif args.read_page:
         print_page_read(result)
     elif args.action:

@@ -1,3 +1,6 @@
+import pytest
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 from brownie_agent.browser import BrowserSession
 
 
@@ -153,3 +156,28 @@ def test_attach_can_reuse_matching_open_tab_without_navigating_or_closing_it(mon
 
     assert unrelated_page.closed is False
     assert verified_page.closed is False
+
+
+@pytest.mark.parametrize(
+    ("method", "position"),
+    [("scroll_down", {"before": 0, "distance": 500, "canScroll": True}),
+     ("scroll_up", {"before": 500, "distance": 500, "canScroll": True})],
+)
+def test_scroll_returns_false_when_page_ignores_wheel(method, position):
+    class Mouse:
+        def wheel(self, _x, _y):
+            pass
+
+    class Page:
+        mouse = Mouse()
+
+        def evaluate(self, _script):
+            return position
+
+        def wait_for_function(self, *_args, **_kwargs):
+            raise PlaywrightTimeoutError("Page did not move")
+
+    session = BrowserSession()
+    session.page = Page()
+
+    assert getattr(session, method)() is False

@@ -1,5 +1,6 @@
 import json
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
@@ -140,3 +141,104 @@ def test_steerer_flag_requires_a_model_mode(monkeypatch):
     monkeypatch.setattr(cli, "BrowserSession", lambda **_: pytest.fail("Invalid flags must stop before browser launch"))
     with pytest.raises(SystemExit):
         cli.main()
+
+
+def test_search_needs_no_url_and_launches_headed_isolated_browser(monkeypatch, capsys):
+    captured = {}
+
+    class Context:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            assert captured["waited"] is True
+            captured["exited"] = True
+
+    def session(**options):
+        captured["browser_options"] = options
+        return Context()
+
+    def search(_browser, goal, **options):
+        captured["goal"] = goal
+        captured["search_options"] = options
+        return {
+            "goal": goal,
+            "status": "source_read",
+            "stop_reason": "one_source_read",
+            "search_engine": "https://duckduckgo.com/",
+            "search_query": "fixture query",
+            "steps": [],
+            "last_page": {"url": "https://example.test/report", "title": "Report"},
+            "source": {
+                "url": "https://example.test/report", "title": "Report", "material": "Evidence",
+                "seen_elements": [], "scrolls": 0, "stop_reason": "bottom",
+            },
+        }
+
+    monkeypatch.setattr("sys.argv", [
+        "brownie", "--search", "--keep-open", "--steerer", "llm", "--goal", "Find the report", "--json",
+    ])
+    monkeypatch.setattr(cli, "BrowserSession", session)
+    monkeypatch.setattr(cli, "run_search", search)
+    monkeypatch.setattr(cli, "load_env", lambda _: None)
+    monkeypatch.setattr("builtins.input", lambda: captured.setdefault("waited", True) and "")
+
+    cli.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "source_read"
+    assert captured["goal"] == "Find the report"
+    assert captured["browser_options"]["headed"] is True
+    assert captured["browser_options"]["cdp_url"] is None
+    assert captured["search_options"]["provider"] == "llm"
+    assert captured["waited"] is True
+    assert captured["exited"] is True
+
+
+def test_managed_cdp_search_starts_chrome_then_attaches(monkeypatch, capsys):
+    captured = {"events": []}
+
+    class ChromeContext:
+        def __init__(self, **options):
+            captured["managed_options"] = options
+
+        def __enter__(self):
+            captured["events"].append("chrome_started")
+            return self
+
+        def __exit__(self, *_args):
+            captured["events"].append("chrome_stopped")
+
+    class BrowserContext:
+        def __init__(self, **options):
+            captured["browser_options"] = options
+
+        def __enter__(self):
+            captured["events"].append("browser_attached")
+            return object()
+
+        def __exit__(self, *_args):
+            captured["events"].append("browser_detached")
+
+    monkeypatch.setattr("sys.argv", [
+        "brownie", "--managed-cdp", "--search", "--goal", "Find the report", "--json",
+    ])
+    monkeypatch.setattr(cli, "ManagedChrome", ChromeContext)
+    monkeypatch.setattr(cli, "BrowserSession", BrowserContext)
+    monkeypatch.setattr(cli, "load_env", lambda _: None)
+    monkeypatch.setattr(cli, "run_search", lambda *_args, **_options: {
+        "status": "source_read",
+        "stop_reason": "one_source_read",
+        "search_query": "fixture query",
+        "last_page": {"url": "https://example.test/report", "title": "Report"},
+        "source": {"url": "https://example.test/report", "title": "Report", "material": "Evidence",
+                   "scrolls": 0, "stop_reason": "bottom"},
+    })
+
+    cli.main()
+
+    assert json.loads(capsys.readouterr().out)["status"] == "source_read"
+    assert captured["managed_options"]["profile_dir"] == Path(".browser-profile-cdp")
+    assert captured["managed_options"]["endpoint"] == "http://127.0.0.1:9222"
+    assert captured["browser_options"]["cdp_url"] == "http://127.0.0.1:9222"
+    assert captured["events"] == ["chrome_started", "browser_attached", "browser_detached", "chrome_stopped"]
