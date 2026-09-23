@@ -67,3 +67,11 @@ def test_polling_does_not_replace_unchanged_copyable_text():
     assert "if(eventKey!==lastEvents)" in HTML
     assert "if(logText!==lastLogs)" in HTML
     assert "function setText(id,value)" in HTML
+
+
+def test_product_ui_exposes_keys_and_quit_without_returning_secrets():
+    assert 'id="typesafe-key" type="password"' in HTML
+    assert 'id="gemini-key" type="password"' in HTML
+    assert 'id="quit"' in HTML
+    assert "/api/settings" in HTML
+    assert "Brownie has stopped." in HTML

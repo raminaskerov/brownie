@@ -103,7 +103,30 @@ the CLI so its browser context can clean up; it does not retry the current actio
 The inspector and final reply make no additional model calls. They can contain
 private page text, URLs, and typed values because the normal opt-in trace is used.
 
-## Setup
+## Windows product-test build
+
+Brownie keeps one codebase. Every push to `main` automatically runs the
+offline tests on a Windows GitHub runner and produces a portable
+`Brownie-Windows` artifact.
+
+For a nontechnical tester:
+
+1. Download the `Brownie-Windows` artifact from the latest successful
+   **Windows product build** workflow run.
+2. Extract the complete ZIP.
+3. Double-click `Brownie.exe`.
+4. If a model-powered task is needed, open **Model keys** once and paste the
+   supplied TypeSafe and/or Gemini key.
+5. Use **Quit Brownie** before replacing the build.
+
+The tester does not install Python, `uv`, or Git and does not use a terminal.
+Google Chrome must already be installed. This is deliberately an unsigned
+portable development build rather than an installer, so Windows may show a
+SmartScreen warning. Brownie stores its private settings, traces, and browser
+profiles under `%LOCALAPPDATA%\Brownie`; keys and profiles are never included
+in the build artifact.
+
+## Source setup
 
 From this directory:
 

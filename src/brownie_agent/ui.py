@@ -7,7 +7,6 @@ import os
 import secrets
 import signal
 import subprocess
-import sys
 import threading
 import webbrowser
 from http import HTTPStatus
@@ -15,6 +14,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
+
+from .config import default_ui_runtime_dir
+from .launcher import worker_command
+from .settings import provider_status, save_provider_keys, validate_provider_settings
 
 MAX_BODY_BYTES = 64 * 1024
 MAX_LOG_LINES = 160
@@ -60,7 +63,7 @@ def build_command(config: dict, *, trace_path: Path) -> list[str]:
 
     max_steps = _bounded_int(config.get("max_steps", 8), "Action limit", minimum=1, maximum=100)
     max_pages = _bounded_int(config.get("max_pages", 3), "Page limit", minimum=1, maximum=30)
-    command = [sys.executable, "-m", "brownie_agent.cli"]
+    command = worker_command()
     if browser == "managed":
         command.append("--managed-cdp")
     elif browser == "playwright":
@@ -190,7 +193,11 @@ class RunManager:
                 self._message = "Finished - browser left open for you"
 
     def start(self, config: dict) -> None:
+        validate_provider_settings(self.runtime_dir, config)
         command = build_command(config, trace_path=self.trace_path)
+        environment = os.environ.copy()
+        environment["BROWNIE_RUNTIME_DIR"] = str(self.runtime_dir)
+        environment["PYTHONUNBUFFERED"] = "1"
         with self._lock:
             if self._process is not None and self._process.poll() is None:
                 raise RuntimeError("A Brownie run is already active")
@@ -199,7 +206,7 @@ class RunManager:
             self._status, self._message, self._stop_requested = "starting", "Starting Brownie and Chrome...", False
             options: dict[str, Any] = {
                 "cwd": self.runtime_dir, "stdin": subprocess.PIPE, "stdout": subprocess.PIPE,
-                "stderr": subprocess.PIPE, "text": True, "bufsize": 1,
+                "stderr": subprocess.PIPE, "text": True, "bufsize": 1, "env": environment,
             }
             if os.name == "nt":
                 options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -253,6 +260,14 @@ class RunManager:
             self._status, self._message = "stopping", "Stopping after the current browser call..."
         process.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
 
+    def save_settings(self, payload: dict) -> dict[str, bool]:
+        return save_provider_keys(self.runtime_dir, payload)
+
+    def ensure_idle(self) -> None:
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                raise RuntimeError("Stop or close the active Brownie run before quitting")
+
     def snapshot(self) -> dict:
         events = _read_trace(self.trace_path)
         summaries = [summary for item in events if (summary := _event_summary(item)) is not None]
@@ -270,6 +285,7 @@ class RunManager:
                 "event_count": len(events), "events": summaries[-30:],
                 "reply": _result_reply(result) if result is not None else "",
                 "logs": list(self._logs), "inspector_ready": self.inspector_path.exists(),
+                "settings": provider_status(self.runtime_dir),
             }
 
 
@@ -278,6 +294,7 @@ HTML = r'''<!doctype html>
 <title>Brownie control room</title>
 <style>
 :root{--paper:#f1efe8;--ink:#1e211f;--muted:#68706b;--line:#d4d0c5;--panel:#fbfaf6;--green:#315d47;--red:#a33b32}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.45 system-ui,sans-serif}header{align-items:center;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;padding:18px 28px}h1{font-size:22px;margin:0}h2{font-size:16px;margin:0 0 14px}.status{background:#e2e7e1;border-radius:99px;color:var(--green);font-weight:700;padding:7px 12px}main{display:grid;gap:18px;grid-template-columns:minmax(300px,390px) minmax(420px,1fr);margin:0 auto;max-width:1500px;padding:20px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px}label{color:var(--muted);display:block;font-size:12px;font-weight:700;letter-spacing:.04em;margin:13px 0 5px;text-transform:uppercase}input,select,textarea{background:white;border:1px solid #bbb6aa;border-radius:7px;color:var(--ink);font:inherit;padding:9px 10px;width:100%}textarea{min-height:112px;resize:vertical}.row{display:grid;gap:10px;grid-template-columns:1fr 1fr}.toggle{align-items:center;display:flex;gap:8px;margin:13px 0}.toggle input{width:auto}button{background:var(--green);border:0;border-radius:7px;color:white;cursor:pointer;font:inherit;font-weight:700;padding:10px 14px}button.secondary{background:#dedbd1;color:var(--ink)}button.danger{background:var(--red)}button:disabled{cursor:not-allowed;opacity:.45}.buttons,.tabs{display:flex;flex-wrap:wrap;gap:8px;margin-top:15px}.help{color:var(--muted);font-size:13px}.work{display:grid;gap:18px;grid-template-rows:auto auto minmax(420px,1fr);min-width:0}.reply{background:#fff;border-left:4px solid var(--green);min-height:100px;padding:13px;white-space:pre-wrap;word-break:break-word}.timeline{color:var(--muted);margin:0;padding-left:22px}.timeline li{margin:5px 0}.tabs{margin:0 0 10px}.tabs button{background:#dedbd1;color:var(--ink)}.tabs button.active{background:var(--ink);color:white}iframe{background:white;border:1px solid var(--line);border-radius:7px;height:68vh;width:100%}pre{background:#171918;color:#e8e8e4;max-height:68vh;overflow:auto;padding:14px;white-space:pre-wrap;word-break:break-word}.hidden{display:none}.error{color:var(--red);min-height:22px}@media(max-width:850px){main{grid-template-columns:1fr}.row{grid-template-columns:1fr}}
+details.settings{border-top:1px solid var(--line);margin-top:18px;padding-top:14px}details.settings summary{cursor:pointer;font-weight:700}.key-status{color:var(--muted);font-size:13px;margin:10px 0}
 </style></head><body>
 <header><h1>Brownie control room</h1><div class="status" id="status">Ready</div></header>
 <main><section class="panel"><h2>Start Brownie</h2>
@@ -287,16 +304,25 @@ HTML = r'''<!doctype html>
 <div class="row"><div><label for="browser">Browser start</label><select id="browser"><option value="managed">Ordinary Chrome + CDP</option><option value="playwright">Playwright-owned Chrome</option><option value="attach">Existing debug Chrome</option></select></div><div id="steerer-wrap"><label for="steerer">Steering</label><select id="steerer"><option value="jev">Jev</option><option value="llm">LLM</option></select></div></div>
 <div class="row" id="budgets"><div><label for="max-steps">Actions</label><input id="max-steps" type="number" min="1" max="100" value="8"></div><div><label for="max-pages">Pages</label><input id="max-pages" type="number" min="1" max="30" value="3"></div></div>
 <label class="toggle"><input id="keep-open" type="checkbox" checked> Leave Brownie's Chrome open after it finishes</label><p class="help" id="browser-help"></p>
-<div class="error" id="error"></div><div class="buttons"><button id="start">Start run</button><button class="secondary" id="close" disabled>Close Brownie browser</button><button class="danger" id="stop" disabled>Stop run</button></div></section>
+<div class="error" id="error"></div><div class="buttons"><button id="start">Start run</button><button class="secondary" id="close" disabled>Close Brownie browser</button><button class="danger" id="stop" disabled>Stop run</button><button class="secondary" id="quit">Quit Brownie</button></div>
+<details class="settings"><summary>Model keys</summary><p class="help">Saved only on this computer. Brownie never shows a saved key again.</p>
+<label for="typesafe-key">TypeSafe key for Jev</label><input id="typesafe-key" type="password" autocomplete="off">
+<label for="gemini-key">Gemini key for LLM and typing</label><input id="gemini-key" type="password" autocomplete="off">
+<div class="key-status" id="key-status">Checking saved keys...</div><button class="secondary" id="save-settings">Save keys</button>
+</details></section>
 <div class="work"><section class="panel"><h2>Brownie says</h2><div class="reply" id="reply">No run yet.</div></section><section class="panel"><h2>What happened</h2><ol class="timeline" id="events"><li>Waiting for a run.</li></ol></section>
 <section class="panel"><div class="tabs"><button id="inspector-tab" class="active">Inspector</button><button id="logs-tab">Process log</button><button id="refresh" class="secondary">Refresh inspector</button></div><iframe id="inspector" title="Last Brownie run inspector"></iframe><pre id="logs" class="hidden">No process output.</pre></section></div></main>
 <script>
 const TOKEN='__TOKEN__',$=id=>document.getElementById(id);let lastInspectorCount=-1,lastEvents='',lastLogs='';
 function setText(id,value){if($(id).textContent!==value)$(id).textContent=value}
 function formState(){return{mode:$('mode').value,goal:$('goal').value,url:$('url').value,browser:$('browser').value,steerer:$('steerer').value,keep_open:$('keep-open').checked,max_steps:Number($('max-steps').value),max_pages:Number($('max-pages').value)}}
+function keyState(){return{typesafe_api_key:$('typesafe-key').value,gemini_api_key:$('gemini-key').value}}
+async function updateSettings(){const response=await fetch('/api/state',{headers:{'X-Brownie-Token':TOKEN}}),state=await response.json(),settings=state.settings||{};setText('key-status','Jev: '+(settings.jev_configured?'ready':'key needed')+' · LLM: '+(settings.llm_configured?'ready':'key needed')+' · Typing: '+(settings.text_configured?'ready':'key needed'))}
 async function post(path,body={}){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Brownie-Token':TOKEN},body:JSON.stringify(body)}),value=await response.json();if(!response.ok)throw new Error(value.error||'Request failed');return value}
 function adaptForm(){const mode=$('mode').value,browser=$('browser').value;$('url-wrap').classList.toggle('hidden',mode==='search');$('goal-wrap').classList.toggle('hidden',!['search','predict','step'].includes(mode));$('steerer-wrap').classList.toggle('hidden',!['search','predict','step'].includes(mode));$('budgets').classList.toggle('hidden',mode!=='search');if(mode==='search'&&browser==='attach')$('browser').value='managed';$('browser').querySelector('[value="attach"]').disabled=mode==='search';$('keep-open').disabled=$('browser').value==='attach'||mode==='predict';const help={managed:'Uses a dedicated profile and starts ordinary headed Chrome through localhost CDP.',playwright:"Starts Playwright-owned headed Chrome with Brownie's isolated profile.",attach:'Reuses a matching tab in Chrome already started with remote debugging. Brownie does not close it.'};$('browser-help').textContent=help[$('browser').value]}
 async function update(){try{const response=await fetch('/api/state',{headers:{'X-Brownie-Token':TOKEN}}),state=await response.json();setText('status',state.message);$('start').disabled=state.active;$('close').disabled=!state.can_close;$('stop').disabled=!state.can_stop;setText('reply',state.reply||(state.active?'Brownie is working...':'No result yet.'));const eventKey=JSON.stringify(state.events);if(eventKey!==lastEvents){$('events').replaceChildren(...(state.events.length?state.events:['Waiting for decisions.']).map(text=>{const li=document.createElement('li');li.textContent=text;return li}));lastEvents=eventKey}const logText=state.logs.join('\n')||'No process output.';if(logText!==lastLogs){$('logs').textContent=logText;lastLogs=logText}if(state.inspector_ready&&state.event_count!==lastInspectorCount&&['completed','failed','stopped','awaiting_close'].includes(state.status)){$('inspector').src='/inspector?t='+encodeURIComponent(TOKEN)+'&v='+state.event_count;lastInspectorCount=state.event_count}}catch(error){setText('error',error.message)}}
+$('save-settings').addEventListener('click',async()=>{$('error').textContent='';try{await post('/api/settings',keyState());$('typesafe-key').value='';$('gemini-key').value='';await updateSettings()}catch(error){$('error').textContent=error.message}});updateSettings();
+$('quit').addEventListener('click',async()=>{try{await post('/api/quit');document.body.innerHTML='<main><section class="panel"><h1>Brownie has stopped.</h1><p>You can close this tab.</p></section></main>'}catch(error){$('error').textContent=error.message}});
 $('mode').addEventListener('change',adaptForm);$('browser').addEventListener('change',adaptForm);$('start').addEventListener('click',async()=>{$('error').textContent='';try{await post('/api/run',formState());await update()}catch(error){$('error').textContent=error.message}});$('close').addEventListener('click',async()=>{try{await post('/api/close')}catch(error){$('error').textContent=error.message}});$('stop').addEventListener('click',async()=>{try{await post('/api/stop')}catch(error){$('error').textContent=error.message}});$('refresh').addEventListener('click',()=>{$('inspector').src='/inspector?t='+encodeURIComponent(TOKEN)+'&v='+Date.now()});$('inspector-tab').addEventListener('click',()=>{$('inspector').classList.remove('hidden');$('logs').classList.add('hidden');$('inspector-tab').classList.add('active');$('logs-tab').classList.remove('active')});$('logs-tab').addEventListener('click',()=>{$('logs').classList.remove('hidden');$('inspector').classList.add('hidden');$('logs-tab').classList.add('active');$('inspector-tab').classList.remove('active')});adaptForm();update();setInterval(update,800);
 </script></body></html>'''
 
@@ -375,8 +401,13 @@ class UIRequestHandler(BaseHTTPRequestHandler):
                 raise ValueError("Request body must be an object")
             if self.path == "/api/run":
                 self.server.manager.start(payload)
+            elif self.path == "/api/settings":
+                self.server.manager.save_settings(payload)
             elif self.path == "/api/close":
                 self.server.manager.close_browser()
+            elif self.path == "/api/quit":
+                self.server.manager.ensure_idle()
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
             elif self.path == "/api/stop":
                 self.server.manager.stop()
             else:
@@ -397,7 +428,7 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Start Brownie's private local control room.")
     result.add_argument("--port", type=int, default=8766, help="Local port (default: 8766)")
     result.add_argument("--no-open", action="store_true", help="Do not open the control page automatically")
-    result.add_argument("--runtime-dir", type=Path, default=Path.cwd(), help="Brownie project/runtime directory")
+    result.add_argument("--runtime-dir", type=Path, default=default_ui_runtime_dir(), help="Brownie runtime directory")
     return result
 
 
@@ -405,6 +436,8 @@ def main() -> None:
     args = parser().parse_args()
     if not 1 <= args.port <= 65535:
         raise SystemExit("--port must be between 1 and 65535")
+    args.runtime_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["BROWNIE_RUNTIME_DIR"] = str(args.runtime_dir.resolve())
     server = BrownieServer(("127.0.0.1", args.port), UIRequestHandler)
     server.manager, server.token = RunManager(args.runtime_dir), secrets.token_urlsafe(32)
     url = f"http://127.0.0.1:{args.port}/"

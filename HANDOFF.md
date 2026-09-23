@@ -1,10 +1,29 @@
-# Brownie continuation ledger — 2026-09-19
+# Brownie continuation ledger — 2026-09-23
 
 ## Objective
 
 Make Brownie reliable for practical browser tasks, resolving observed friction before
 expanding into autonomous multistep execution. Keep Jev and an LLM interchangeable
 as action steerers. The latest priority is the user's failed search-bar discovery.
+
+## Latest update: portable Windows product-test build
+
+- Keep one cross-platform repository. `.github/workflows/windows-build.yml`
+  now tests and builds a portable `Brownie-Windows` artifact on
+  `windows-latest` for each `main` push, version tag, or manual run.
+- The artifact is an unsigned one-folder development build. A tester extracts
+  it and double-clicks `Brownie.exe`; Python, uv, Git, and a terminal are not
+  required. Installed Google Chrome is still required.
+- The packaged executable starts the existing local UI and relaunches itself
+  internally as the isolated CLI worker. Settings, traces, and browser profiles
+  use `%LOCALAPPDATA%\Brownie` on Windows.
+- The UI now saves TypeSafe and Gemini keys locally without returning them,
+  reports only configured status, validates required keys before a run, and has
+  a Quit Brownie control.
+- Local validation: 134 offline tests, Ruff, lock check, diff check, frozen
+  Linux bundle self-check, Playwright-driver startup, worker dispatch, and the
+  localhost settings/status/quit flow. Native Windows artifact execution remains
+  unverified until the committed workflow runs on GitHub.
 
 ## Problem formulation
 
@@ -23,8 +42,8 @@ Do not assume the problem is fixed by switching models or changing one prompt.
 
 ## State
 
-- Working tree contains substantial uncommitted and untracked work from this and
-  earlier development. Preserve it; do not reset or infer this chat authored every diff.
+- Working tree contains uncommitted Windows product-build work from the latest
+  update. Preserve it until reviewed and committed.
 - `AGENTS.md` is the contributor guide; `README.md` documents commands and boundaries.
 - `steering.py` provides public, detached observations, shared choice validation,
   explicit provider selection, and an optional `SteeringRoute` callback with a reason.

@@ -11,6 +11,7 @@ dependencies = [
 [project.scripts]
 brownie = "brownie_agent.cli:main"
 brownie-ui = "brownie_agent.ui:main"
+brownie-app = "brownie_agent.app:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -23,7 +24,7 @@ exclude = ["/.browser-profile/", "/.browser-profile-cdp/", "/.env", "/dist/"]
 packages = ["src/brownie_agent"]
 
 [dependency-groups]
-dev = ["pytest>=8.4,<9", "ruff>=0.14,<1"]
+dev = ["pyinstaller>=6.22,<7", "pytest>=8.4,<9", "ruff>=0.14,<1"]
 
 [tool.ruff]
 line-length = 120

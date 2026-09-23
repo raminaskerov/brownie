@@ -1,0 +1,47 @@
+name: Windows product build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --locked
+      - name: Run offline tests
+        run: uv run python -m pytest
+      - name: Build portable Brownie
+        shell: pwsh
+        run: |
+          $source = (Resolve-Path src).Path
+          $observer = (Resolve-Path src\brownie_agent\observe.js).Path
+          $entry = (Resolve-Path packaging\brownie_windows.py).Path
+          uv run pyinstaller --noconfirm --clean --onedir --console --hide-console hide-early --name Brownie --paths $source --add-data "${observer}:brownie_agent" $entry
+      - name: Smoke-test packaged resources
+        shell: pwsh
+        run: |
+          & ".\dist\Brownie\Brownie.exe" --self-check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ".\dist\Brownie\Brownie.exe" --brownie-worker --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item packaging\README-FIRST.txt dist\Brownie\README-FIRST.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Brownie-Windows
+          path: dist/Brownie/
+          if-no-files-found: error
+          retention-days: 30
