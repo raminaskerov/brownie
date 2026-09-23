@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from brownie_agent.state import decision_state, text_field_state
+from brownie_agent.state import decision_state, text_field_state, web_search_query_state
 from brownie_agent.text_model import generate_field_text
 
 
@@ -94,6 +94,38 @@ def test_generate_field_text_uses_gemini_compatible_strict_json(monkeypatch):
     assert captured["body"]["response_format"]["type"] == "json_schema"
     assert "SEARCH_SEED" in captured["body"]["messages"][0]["content"]
     assert json.loads(captured["body"]["messages"][1]["content"])["goal"] == "Travel to London"
+
+
+def test_web_search_query_state_omits_workflow_wrapper_and_unrelated_controls():
+    state = web_search_query_state(observation(), "Find LessWrong articles about AI safety", 2)
+
+    assert state == {
+        "goal": "Find LessWrong articles about AI safety",
+        "text_mode": "WEB_SEARCH_QUERY",
+        "selected_field": {"role": "textbox", "name": "To"},
+        "current_page": {"url_without_query": "https://example.test/search", "title": "Search"},
+    }
+
+
+def test_web_search_query_uses_a_small_dedicated_prompt(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    captured = {}
+
+    def post(_url, _key, body):
+        captured.update(body)
+        return {"choices": [{"message": {"content": '{"text":"site:lesswrong.com AI safety"}'}}]}
+
+    value, _metadata = generate_field_text({
+        "goal": "Find LessWrong articles about AI safety",
+        "text_mode": "WEB_SEARCH_QUERY",
+        "selected_field": {"role": "searchbox", "name": "Search"},
+        "current_page": {"url_without_query": "https://duckduckgo.com/", "title": "DuckDuckGo"},
+    }, post=post)
+
+    assert value == "site:lesswrong.com AI safety"
+    assert captured["max_tokens"] == 64
+    assert "site:" in captured["messages"][0]["content"]
+    assert "FIELD_VALUE" not in captured["messages"][0]["content"]
 
 
 @pytest.mark.parametrize("content", ['{"text":null}', '{"text":"","explanation":"missing"}', "not json"])

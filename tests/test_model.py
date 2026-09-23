@@ -44,23 +44,17 @@ def test_predict_action_validates_operation_and_selected_target(monkeypatch):
 
     def fake_post(url, key, body):
         captured.update(url=url, key=key, body=body)
+        moves = body["questions"]["move"]["criteria"]
         return {
             "model": "jev-test",
             "answers": {
-                "operation": {
-                    "choice": "CLICK",
-                    "probabilities": {"CLICK": 0.7, "TYPE_TEXT": 0.1, "DONE": 0.1, "BLOCKED": 0.1},
+                "move": {
+                    "choice": "CLICK:2",
+                    "probabilities": {
+                        move: (0.7 if move == "CLICK:2" else 0.3 / (len(moves) - 1))
+                        for move in moves
+                    },
                     "confidence": 0.8,
-                },
-                "click_target": {
-                    "choice": "2",
-                    "probabilities": {"1": 0.2, "2": 0.8},
-                    "confidence": 0.9,
-                },
-                "type_text_target": {
-                    "choice": "1",
-                    "probabilities": {"1": 1.0},
-                    "confidence": 1.0,
                 },
             },
         }
@@ -72,9 +66,12 @@ def test_predict_action_validates_operation_and_selected_target(monkeypatch):
     assert prediction["target_name"] == "Search"
     assert prediction["executed"] is False
     assert captured["key"] == "test-key"
-    assert captured["body"]["questions"]["click_target"]["criteria"].keys() == {"1", "2"}
+    assert captured["body"]["questions"]["move"]["criteria"].keys() == {
+        "CLICK:1", "CLICK:2", "TYPE_TEXT:1", "DONE", "BLOCKED",
+    }
     assert captured["body"]["state"]["goal"] == "Run the search"
     assert captured["body"]["state"]["current_page"]["visible_text"] == "Search places"
+    assert "current_elements" not in captured["body"]["state"]
     serialized_request = json.dumps(captured["body"])
     assert "node_id" not in serialized_request
     assert "not-sent" not in serialized_request
@@ -83,17 +80,13 @@ def test_predict_action_validates_operation_and_selected_target(monkeypatch):
 def test_predict_action_rejects_invalid_selected_target(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
 
-    def fake_post(_url, _key, _body):
+    def fake_post(_url, _key, body):
+        moves = body["questions"]["move"]["criteria"]
         return {
             "answers": {
-                "operation": {
-                    "choice": "CLICK",
-                    "probabilities": {"CLICK": 0.7, "TYPE_TEXT": 0.1, "DONE": 0.1, "BLOCKED": 0.1},
-                    "confidence": 0.8,
-                },
-                "click_target": {
-                    "choice": "99",
-                    "probabilities": {"99": 1.0},
+                "move": {
+                    "choice": "CLICK:99",
+                    "probabilities": {move: 1 / len(moves) for move in moves},
                     "confidence": 1.0,
                 },
             }
@@ -110,23 +103,17 @@ def test_predict_action_returns_mode_for_selected_text_field(monkeypatch):
 
     def fake_post(_url, _key, body):
         captured.update(body)
+        moves = body["questions"]["move"]["criteria"]
         return {
             "model": "jev-test",
             "answers": {
-                "operation": {
-                    "choice": "TYPE_TEXT",
-                    "probabilities": {"CLICK": 0.1, "TYPE_TEXT": 0.8, "DONE": 0.05, "BLOCKED": 0.05},
+                "move": {
+                    "choice": "TYPE_TEXT:1",
+                    "probabilities": {
+                        move: (0.8 if move == "TYPE_TEXT:1" else 0.2 / (len(moves) - 1))
+                        for move in moves
+                    },
                     "confidence": 0.8,
-                },
-                "click_target": {
-                    "choice": "1",
-                    "probabilities": {"1": 0.4, "2": 0.6},
-                    "confidence": 0.2,
-                },
-                "type_text_target": {
-                    "choice": "1",
-                    "probabilities": {"1": 1.0},
-                    "confidence": 1.0,
                 },
                 "text_mode_1": {"choice": "SEARCH_SEED", "probabilities": modes, "confidence": 0.7},
             },
@@ -138,7 +125,9 @@ def test_predict_action_returns_mode_for_selected_text_field(monkeypatch):
     assert prediction["target"] == 1
     assert prediction["text_mode"] == "SEARCH_SEED"
     assert prediction["text_mode_probabilities"] == modes
-    assert captured["questions"]["text_mode_1"]["instructions"]["field"]["name"] == "Destination"
+    assert captured["questions"]["text_mode_1"]["instructions"]["field"] == {
+        "index": 1, "role": "searchbox", "name": "Destination",
+    }
     assert "text_mode_2" not in captured["questions"]
 
 
@@ -146,26 +135,20 @@ def test_predict_action_can_select_submit_for_a_form_field(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
     state = observation()
     state["elements"][0]["operations"].append("SUBMIT")
+    state["elements"][0]["value"] = "completed query"
 
-    def fake_post(_url, _key, _body):
+    def fake_post(_url, _key, body):
+        moves = body["questions"]["move"]["criteria"]
         return {
             "model": "jev-test",
             "answers": {
-                "operation": {
-                    "choice": "SUBMIT",
+                "move": {
+                    "choice": "SUBMIT:1",
                     "probabilities": {
-                        "CLICK": 0.05,
-                        "TYPE_TEXT": 0.05,
-                        "SUBMIT": 0.8,
-                        "DONE": 0.05,
-                        "BLOCKED": 0.05,
+                        move: (0.8 if move == "SUBMIT:1" else 0.2 / (len(moves) - 1))
+                        for move in moves
                     },
                     "confidence": 0.8,
-                },
-                "submit_target": {
-                    "choice": "1",
-                    "probabilities": {"1": 1.0},
-                    "confidence": 1.0,
                 },
             },
         }

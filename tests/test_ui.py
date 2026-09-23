@@ -2,7 +2,7 @@ import sys
 
 import pytest
 
-from brownie_agent.ui import _result_reply, build_command
+from brownie_agent.ui import HTML, _result_reply, build_command
 
 
 def test_search_command_is_typed_and_keeps_managed_browser_open(tmp_path):
@@ -22,7 +22,7 @@ def test_search_command_is_typed_and_keeps_managed_browser_open(tmp_path):
     assert "--search" in command
     assert "--keep-open" in command
     assert command[command.index("--goal") + 1] == "Find the official report"
-    assert command[command.index("--max-scrolls") + 1] == "0"
+    assert "--max-scrolls" not in command
 
 
 def test_attached_search_is_rejected(tmp_path):
@@ -53,10 +53,6 @@ def test_command_rejects_unbounded_or_non_url_input(tmp_path):
         build_command({
             "mode": "observe", "browser": "playwright", "url": "example.test",
         }, trace_path=tmp_path / "last-run.jsonl")
-    with pytest.raises(ValueError, match="Scroll limit"):
-        build_command({
-            "mode": "read", "browser": "playwright", "url": "https://example.test", "max_scrolls": 101,
-        }, trace_path=tmp_path / "last-run.jsonl")
 
 
 def test_result_reply_reports_source_without_an_extra_model_call():
@@ -65,3 +61,9 @@ def test_result_reply_reports_source_without_an_extra_model_call():
     })
 
     assert reply == "I found and read: Report\nhttps://example.test/report\n\nGrounded text"
+
+
+def test_polling_does_not_replace_unchanged_copyable_text():
+    assert "if(eventKey!==lastEvents)" in HTML
+    assert "if(logText!==lastLogs)" in HTML
+    assert "function setText(id,value)" in HTML

@@ -29,6 +29,8 @@ def action_space(observation: dict) -> dict[str, list[int] | None]:
         space["SCROLL_UP"] = None
     for element in observation["elements"]:
         for operation in element["operations"]:
+            if operation == "SUBMIT" and not str(element.get("value", "")).strip():
+                continue
             space.setdefault(operation, []).append(element["index"])
     return {operation: space[operation] for operation in OPERATIONS if operation in space}
 

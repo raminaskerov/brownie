@@ -19,9 +19,10 @@ DECISION_HISTORY_KEYS = (
     "status",
     "before_url",
     "after_url",
-    "page_changed",
+    "observation_changed",
+    "url_changed",
 )
-TEXT_HISTORY_KEYS = ("operation", "target_name", "status", "page_changed")
+TEXT_HISTORY_KEYS = ("operation", "target_name", "status", "observation_changed", "url_changed")
 
 
 def public_element(element: dict) -> dict:
@@ -88,4 +89,20 @@ def text_field_state(observation: dict, goal: str, prediction: dict, recent_step
             "title": observation["title"],
         },
         "recent_steps": _recent_steps(recent_steps, TEXT_HISTORY_KEYS),
+    }
+
+
+def web_search_query_state(observation: dict, goal: str, target: int) -> dict:
+    """Return only the facts needed to write one general web-search query."""
+    selected = next((element for element in observation["elements"] if element["index"] == target), None)
+    if selected is None or "TYPE_TEXT" not in selected["operations"]:
+        raise ValueError("Web-search query target is not an observed editable field.")
+    return {
+        "goal": goal,
+        "text_mode": "WEB_SEARCH_QUERY",
+        "selected_field": {"role": selected["role"], "name": selected["name"]},
+        "current_page": {
+            "url_without_query": _url_without_query(observation["url"]),
+            "title": observation["title"],
+        },
     }

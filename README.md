@@ -40,7 +40,10 @@ it. Without this flag, the browser closes when the command completes.
 With `--managed-cdp`, Brownie starts ordinary headed Chrome with its dedicated
 `.browser-profile-cdp/`, attaches through localhost, opens the code-owned
 DuckDuckGo start page, and uses the same validated one-action boundary for every
-step. It stops after opening and reading one external source. The default limits
+step. When the start page has one unambiguous search form, code owns typing and
+submission: the text helper writes a compact web query from the original goal,
+then the selected steerer begins with the semantic choice among search results.
+It stops after opening and reading one external source. The default limits
 are eight browser actions, three distinct pages, and ten source-page scrolls;
 use `--max-steps`, `--max-pages`, and `--max-scrolls` to lower them. Omit
 `--managed-cdp` only when you deliberately want the original Playwright-launched
@@ -59,7 +62,7 @@ sufficiency.
 Add an opt-in trace to any run:
 
 ```bash
-./.venv/bin/brownie --managed-cdp --search --max-scrolls 0 --steerer jev \
+./.venv/bin/brownie --managed-cdp --search --steerer jev \
   --trace artifacts/last-run.jsonl --goal "Find the official Python pathlib documentation"
 ```
 
@@ -222,8 +225,11 @@ package. Set `BROWNIE_RUNTIME_DIR` to use one explicit private runtime directory
 for both paths. Set that variable in the shell or process environment because it
 must be known before Brownie can locate `.env`.
 
-Prediction mode sends the goal, visible page text, descriptive element fields,
-and offered operations to TypeSafe. It never sends Brownie's internal node IDs,
+Prediction mode sends the goal, visible page text, compact complete moves, and
+only non-empty descriptive target fields to TypeSafe. A complete move combines
+an operation with its current target, replacing separate operation/click/type/
+submit questions. Editable fields still receive a bounded value-shape question.
+It never sends Brownie's internal node IDs,
 never executes the answer, and does not invoke a text-generation model.
 
 ## One provider-selected step
@@ -366,10 +372,11 @@ remembers visited page/view fingerprints, per-page scroll extents and counts,
 recent factual outcomes, and observed form values even after their controls move
 offscreen. It never stores executable node references as memory.
 
-The controller stops on step/page/scroll budgets, no-effect actions, a repeated
+The controller stops on step/page budgets, no-effect actions, a repeated
 mutation from the same observed state, or repeated action-state cycles of any
-period represented in its bounded history. These guards are implemented and
-tested, but they are not connected to an automatic `--run` mode yet.
+period represented in its bounded history. A per-page scroll limit rejects only
+a later scroll action; reaching it cannot stop typing, submitting, or clicking.
+These guards are implemented and tested in the bounded search runner.
 
 ## Prepare login state
 

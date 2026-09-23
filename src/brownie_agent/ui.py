@@ -60,7 +60,6 @@ def build_command(config: dict, *, trace_path: Path) -> list[str]:
 
     max_steps = _bounded_int(config.get("max_steps", 8), "Action limit", minimum=1, maximum=100)
     max_pages = _bounded_int(config.get("max_pages", 3), "Page limit", minimum=1, maximum=30)
-    max_scrolls = _bounded_int(config.get("max_scrolls", 0), "Scroll limit", minimum=0, maximum=100)
     command = [sys.executable, "-m", "brownie_agent.cli"]
     if browser == "managed":
         command.append("--managed-cdp")
@@ -73,12 +72,11 @@ def build_command(config: dict, *, trace_path: Path) -> list[str]:
         command.extend((
             "--search", "--goal", goal, "--steerer", steerer,
             "--max-steps", str(max_steps), "--max-pages", str(max_pages),
-            "--max-scrolls", str(max_scrolls),
         ))
     elif mode in {"predict", "step"}:
         command.extend((f"--{mode}", "--goal", goal, "--steerer", steerer, url))
     elif mode == "read":
-        command.extend(("--read-page", "--max-scrolls", str(max_scrolls), url))
+        command.extend(("--read-page", url))
     else:
         command.append(url)
     if bool(config.get("keep_open", True)) and browser != "attach" and mode != "predict":
@@ -197,7 +195,7 @@ class RunManager:
             if self._process is not None and self._process.poll() is None:
                 raise RuntimeError("A Brownie run is already active")
             self.trace_path.parent.mkdir(parents=True, exist_ok=True)
-            self._logs = []
+            self._logs = [f"command: {json.dumps(command, ensure_ascii=False)}"]
             self._status, self._message, self._stop_requested = "starting", "Starting Brownie and Chrome...", False
             options: dict[str, Any] = {
                 "cwd": self.runtime_dir, "stdin": subprocess.PIPE, "stdout": subprocess.PIPE,
@@ -288,17 +286,17 @@ HTML = r'''<!doctype html>
 <div id="url-wrap" class="hidden"><label for="url">Start URL</label><input id="url" type="url" placeholder="https://example.com"></div>
 <div class="row"><div><label for="browser">Browser start</label><select id="browser"><option value="managed">Ordinary Chrome + CDP</option><option value="playwright">Playwright-owned Chrome</option><option value="attach">Existing debug Chrome</option></select></div><div id="steerer-wrap"><label for="steerer">Steering</label><select id="steerer"><option value="jev">Jev</option><option value="llm">LLM</option></select></div></div>
 <div class="row" id="budgets"><div><label for="max-steps">Actions</label><input id="max-steps" type="number" min="1" max="100" value="8"></div><div><label for="max-pages">Pages</label><input id="max-pages" type="number" min="1" max="30" value="3"></div></div>
-<label for="max-scrolls">Source-page scrolls</label><input id="max-scrolls" type="number" min="0" max="100" value="0"><p class="help">Zero reads only the chosen source's first viewport.</p>
 <label class="toggle"><input id="keep-open" type="checkbox" checked> Leave Brownie's Chrome open after it finishes</label><p class="help" id="browser-help"></p>
 <div class="error" id="error"></div><div class="buttons"><button id="start">Start run</button><button class="secondary" id="close" disabled>Close Brownie browser</button><button class="danger" id="stop" disabled>Stop run</button></div></section>
 <div class="work"><section class="panel"><h2>Brownie says</h2><div class="reply" id="reply">No run yet.</div></section><section class="panel"><h2>What happened</h2><ol class="timeline" id="events"><li>Waiting for a run.</li></ol></section>
 <section class="panel"><div class="tabs"><button id="inspector-tab" class="active">Inspector</button><button id="logs-tab">Process log</button><button id="refresh" class="secondary">Refresh inspector</button></div><iframe id="inspector" title="Last Brownie run inspector"></iframe><pre id="logs" class="hidden">No process output.</pre></section></div></main>
 <script>
-const TOKEN='__TOKEN__',$=id=>document.getElementById(id);let lastInspectorCount=-1;
-function formState(){return{mode:$('mode').value,goal:$('goal').value,url:$('url').value,browser:$('browser').value,steerer:$('steerer').value,keep_open:$('keep-open').checked,max_steps:Number($('max-steps').value),max_pages:Number($('max-pages').value),max_scrolls:Number($('max-scrolls').value)}}
+const TOKEN='__TOKEN__',$=id=>document.getElementById(id);let lastInspectorCount=-1,lastEvents='',lastLogs='';
+function setText(id,value){if($(id).textContent!==value)$(id).textContent=value}
+function formState(){return{mode:$('mode').value,goal:$('goal').value,url:$('url').value,browser:$('browser').value,steerer:$('steerer').value,keep_open:$('keep-open').checked,max_steps:Number($('max-steps').value),max_pages:Number($('max-pages').value)}}
 async function post(path,body={}){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Brownie-Token':TOKEN},body:JSON.stringify(body)}),value=await response.json();if(!response.ok)throw new Error(value.error||'Request failed');return value}
 function adaptForm(){const mode=$('mode').value,browser=$('browser').value;$('url-wrap').classList.toggle('hidden',mode==='search');$('goal-wrap').classList.toggle('hidden',!['search','predict','step'].includes(mode));$('steerer-wrap').classList.toggle('hidden',!['search','predict','step'].includes(mode));$('budgets').classList.toggle('hidden',mode!=='search');if(mode==='search'&&browser==='attach')$('browser').value='managed';$('browser').querySelector('[value="attach"]').disabled=mode==='search';$('keep-open').disabled=$('browser').value==='attach'||mode==='predict';const help={managed:'Uses a dedicated profile and starts ordinary headed Chrome through localhost CDP.',playwright:"Starts Playwright-owned headed Chrome with Brownie's isolated profile.",attach:'Reuses a matching tab in Chrome already started with remote debugging. Brownie does not close it.'};$('browser-help').textContent=help[$('browser').value]}
-async function update(){try{const response=await fetch('/api/state',{headers:{'X-Brownie-Token':TOKEN}}),state=await response.json();$('status').textContent=state.message;$('start').disabled=state.active;$('close').disabled=!state.can_close;$('stop').disabled=!state.can_stop;$('reply').textContent=state.reply||(state.active?'Brownie is working...':'No result yet.');$('events').replaceChildren(...(state.events.length?state.events:['Waiting for decisions.']).map(text=>{const li=document.createElement('li');li.textContent=text;return li}));$('logs').textContent=state.logs.join('\n')||'No process output.';if(state.inspector_ready&&state.event_count!==lastInspectorCount&&['completed','failed','stopped','awaiting_close'].includes(state.status)){$('inspector').src='/inspector?t='+encodeURIComponent(TOKEN)+'&v='+state.event_count;lastInspectorCount=state.event_count}}catch(error){$('error').textContent=error.message}}
+async function update(){try{const response=await fetch('/api/state',{headers:{'X-Brownie-Token':TOKEN}}),state=await response.json();setText('status',state.message);$('start').disabled=state.active;$('close').disabled=!state.can_close;$('stop').disabled=!state.can_stop;setText('reply',state.reply||(state.active?'Brownie is working...':'No result yet.'));const eventKey=JSON.stringify(state.events);if(eventKey!==lastEvents){$('events').replaceChildren(...(state.events.length?state.events:['Waiting for decisions.']).map(text=>{const li=document.createElement('li');li.textContent=text;return li}));lastEvents=eventKey}const logText=state.logs.join('\n')||'No process output.';if(logText!==lastLogs){$('logs').textContent=logText;lastLogs=logText}if(state.inspector_ready&&state.event_count!==lastInspectorCount&&['completed','failed','stopped','awaiting_close'].includes(state.status)){$('inspector').src='/inspector?t='+encodeURIComponent(TOKEN)+'&v='+state.event_count;lastInspectorCount=state.event_count}}catch(error){setText('error',error.message)}}
 $('mode').addEventListener('change',adaptForm);$('browser').addEventListener('change',adaptForm);$('start').addEventListener('click',async()=>{$('error').textContent='';try{await post('/api/run',formState());await update()}catch(error){$('error').textContent=error.message}});$('close').addEventListener('click',async()=>{try{await post('/api/close')}catch(error){$('error').textContent=error.message}});$('stop').addEventListener('click',async()=>{try{await post('/api/stop')}catch(error){$('error').textContent=error.message}});$('refresh').addEventListener('click',()=>{$('inspector').src='/inspector?t='+encodeURIComponent(TOKEN)+'&v='+Date.now()});$('inspector-tab').addEventListener('click',()=>{$('inspector').classList.remove('hidden');$('logs').classList.add('hidden');$('inspector-tab').classList.add('active');$('logs-tab').classList.remove('active')});$('logs-tab').addEventListener('click',()=>{$('logs').classList.remove('hidden');$('inspector').classList.add('hidden');$('logs-tab').classList.add('active');$('inspector-tab').classList.remove('active')});adaptForm();update();setInterval(update,800);
 </script></body></html>'''
 

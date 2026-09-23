@@ -3,11 +3,11 @@
 from urllib.parse import urlsplit
 
 from .access import READY, classify_access
-from .actions import StaleObservation, execute_action, execute_prediction
+from .actions import StaleObservation, element_description, execute_action, execute_prediction
 from .controller import RunState
 from .evidence import evidence_candidates
 from .reader import read_page
-from .state import text_field_state
+from .state import text_field_state, web_search_query_state
 from .steering import steer_action
 from .text_model import generate_field_text
 from .trace import trace_event
@@ -72,6 +72,27 @@ def _source_result(state: RunState, report: dict, *, query: str | None) -> dict:
     }
 
 
+def _unique_search_field(observation: dict) -> dict | None:
+    candidates = [
+        element for element in observation["elements"]
+        if "TYPE_TEXT" in element["operations"] and "SUBMIT" in element["operations"]
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _local_choice(operation: str, element: dict) -> dict:
+    choice = {
+        "operation": operation,
+        "target": element["index"],
+        "target_name": element_description(element),
+        "source": "local_search_form",
+        "executed": False,
+        "routing": {"provider": "local_search_form", "reason": "Unique visible search form"},
+    }
+    trace_event("steering_result", {"choice": choice})
+    return choice
+
+
 def run_search(
     browser,
     goal: str,
@@ -96,6 +117,64 @@ def run_search(
     browser.open(SEARCH_ENGINE_URL)
     observation = browser.observe()
     state.observe(observation)
+
+    # The search engine is code-owned and normally exposes one unambiguous form.
+    # Keep models for query semantics and result selection, not mechanical form use.
+    search_field = _unique_search_field(observation)
+    if search_field is not None:
+        while stale_refreshes < MAX_STALE_REFRESHES:
+            prediction = _local_choice("TYPE_TEXT", search_field)
+            if reason := state.preflight(prediction, observation):
+                return _stop_result(state, observation, reason=reason, query=query)
+            context = web_search_query_state(observation, state.goal, prediction["target"])
+            value, text_metadata = write_text(context)
+            query = value
+            try:
+                execution = execute_action(
+                    browser,
+                    observation,
+                    operation="TYPE_TEXT",
+                    target=prediction["target"],
+                    text=value,
+                )
+            except StaleObservation:
+                stale_refreshes += 1
+                observation = browser.observe()
+                state.observe(observation)
+                search_field = _unique_search_field(observation)
+                if search_field is None:
+                    break
+                continue
+            execution["text_model"] = text_metadata
+            after = browser.observe()
+            stop_reason = state.record_step(observation, execution, after)
+            if stop_reason:
+                return _stop_result(state, after, reason=stop_reason, query=query)
+            observation = after
+            submit_field = _unique_search_field(observation)
+            if submit_field is None:
+                break
+            prediction = _local_choice("SUBMIT", submit_field)
+            if reason := state.preflight(prediction, observation):
+                return _stop_result(state, observation, reason=reason, query=query)
+            try:
+                execution = execute_prediction(browser, observation, prediction)
+            except StaleObservation:
+                stale_refreshes += 1
+                observation = browser.observe()
+                state.observe(observation)
+                search_field = _unique_search_field(observation)
+                if search_field is None:
+                    break
+                continue
+            execution["page_ready"] = browser.wait_for_page_ready(observation["url"])
+            after = browser.observe()
+            stop_reason = state.record_step(observation, execution, after)
+            if stop_reason:
+                return _stop_result(state, after, reason=stop_reason, query=query)
+            observation = after
+            stale_refreshes = 0
+            break
 
     while True:
         access = classify_access(observation)

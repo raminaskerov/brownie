@@ -116,7 +116,8 @@ class RunState:
             "after_url": after["url"],
             "before_fingerprint": before_fingerprint,
             "after_fingerprint": after_fingerprint,
-            "page_changed": before_fingerprint != after_fingerprint,
+            "observation_changed": before_fingerprint != after_fingerprint,
+            "url_changed": before["url"] != after["url"],
             "attempt": (before_fingerprint, operation, execution.get("target_name")),
         }
         self.steps.append(step)
@@ -141,14 +142,14 @@ class RunState:
             return f"cycle_{period}"
         if reason := self.budget_stop_reason():
             return reason
-        page = page_key(after["url"])
-        if self.scroll_counts.get(page, 0) >= self.max_scrolls_per_page:
-            return "scroll_budget"
         return None
 
     def recent_steps(self) -> list[dict]:
         """Return bounded factual history suitable for model state."""
-        keys = ("operation", "target_name", "status", "before_url", "after_url", "page_changed")
+        keys = (
+            "operation", "target_name", "status", "before_url", "after_url",
+            "observation_changed", "url_changed",
+        )
         return [{key: step[key] for key in keys if key in step} for step in self.steps[-8:]]
 
     def memory_state(self) -> dict:

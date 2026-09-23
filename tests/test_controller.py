@@ -88,7 +88,8 @@ def test_no_effect_and_budgets_stop_without_model_judgment():
     assert step_limited.record_step(unchanged, execution("CLICK", "Working"), changed) == "step_budget"
 
     scroll_limited = RunState("One scroll only", max_scrolls_per_page=1)
-    assert scroll_limited.record_step(unchanged, execution("SCROLL_DOWN"), changed) == "scroll_budget"
+    assert scroll_limited.record_step(unchanged, execution("SCROLL_DOWN"), changed) is None
+    assert scroll_limited.preflight({"operation": "SCROLL_DOWN"}, changed) == "scroll_budget"
 
 
 def test_zero_scroll_budget_allows_a_run_but_rejects_scroll_actions():
@@ -96,6 +97,15 @@ def test_zero_scroll_budget_allows_a_run_but_rejects_scroll_actions():
     current = observation("https://example.test/", "top")
 
     assert state.preflight({"operation": "SCROLL_DOWN"}, current) == "scroll_budget"
+
+
+def test_zero_scroll_budget_does_not_stop_non_scroll_progress():
+    state = RunState("Enter and submit a query", max_scrolls_per_page=0)
+    before = observation("https://example.test/", "empty")
+    typed = observation("https://example.test/", "typed")
+
+    assert state.record_step(before, execution("TYPE_TEXT", "Search"), typed) is None
+    assert state.preflight({"operation": "SUBMIT", "target_name": "Search"}, typed) is None
 
 
 def test_page_budget_counts_distinct_query_pages_but_not_fragments():

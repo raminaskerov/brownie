@@ -86,22 +86,22 @@ class SearchBrowser:
 
 def test_search_runs_one_query_opens_one_source_and_returns_material():
     browser = SearchBrowser()
-    choices = iter([
-        {"operation": "TYPE_TEXT", "target": 1, "target_name": "Search", "text_mode": "SEARCH_SEED"},
-        {"operation": "SUBMIT", "target": 1, "target_name": "Search", "text_mode": None},
-        {"operation": "CLICK", "target": 1, "target_name": "Official Solar Report", "text_mode": None},
-    ])
+    choices = iter([{
+        "operation": "CLICK", "target": 1, "target_name": "Official Solar Report", "text_mode": None,
+    }])
 
-    def choose(_observation, _goal, _recent_steps, *, provider):
+    def choose(current, _goal, _recent_steps, *, provider):
         assert provider == "llm"
+        assert current["url"].startswith("https://duckduckgo.com/?q=")
         return next(choices)
 
+    contexts = []
     result = run_search(
         browser,
         "Find the official solar capacity figure",
         provider="llm",
         choose_action=choose,
-        write_text=lambda _context: ("official solar report", {"model": "fixture"}),
+        write_text=lambda context: contexts.append(context) or ("official solar report", {"model": "fixture"}),
     )
 
     assert browser.opened == SEARCH_ENGINE_URL
@@ -110,6 +110,12 @@ def test_search_runs_one_query_opens_one_source_and_returns_material():
     assert result["source"]["url"] == "https://example.test/report"
     assert "100 GW" in result["source"]["material"]
     assert [step["operation"] for step in result["steps"]] == ["TYPE_TEXT", "SUBMIT", "CLICK"]
+    assert contexts == [{
+        "goal": "Find the official solar capacity figure",
+        "text_mode": "WEB_SEARCH_QUERY",
+        "selected_field": {"role": "searchbox", "name": "Search"},
+        "current_page": {"url_without_query": SEARCH_ENGINE_URL, "title": "DuckDuckGo"},
+    }]
 
 
 def test_search_stops_when_steerer_cannot_progress_before_opening_source():
@@ -118,6 +124,7 @@ def test_search_stops_when_steerer_cannot_progress_before_opening_source():
     result = run_search(
         browser,
         "Find a report",
+        write_text=lambda _context: ("official solar report", {"model": "fixture"}),
         choose_action=lambda *_args, **_kwargs: {
             "operation": "BLOCKED", "target": None, "target_name": None, "text_mode": None,
         },
@@ -143,12 +150,9 @@ def test_search_reobserves_and_redecides_after_one_stale_prediction():
             return result
 
     browser = StaleOnceBrowser()
-    choices = iter([
-        {"operation": "TYPE_TEXT", "target": 1, "target_name": "Search", "text_mode": "SEARCH_SEED"},
-        {"operation": "TYPE_TEXT", "target": 1, "target_name": "Search", "text_mode": "SEARCH_SEED"},
-        {"operation": "SUBMIT", "target": 1, "target_name": "Search", "text_mode": None},
-        {"operation": "CLICK", "target": 1, "target_name": "Official Solar Report", "text_mode": None},
-    ])
+    choices = iter([{
+        "operation": "CLICK", "target": 1, "target_name": "Official Solar Report", "text_mode": None,
+    }])
 
     result = run_search(
         browser,
@@ -158,4 +162,21 @@ def test_search_reobserves_and_redecides_after_one_stale_prediction():
     )
 
     assert result["status"] == "source_read"
+    assert [step["operation"] for step in result["steps"]] == ["TYPE_TEXT", "SUBMIT", "CLICK"]
+
+
+def test_zero_source_scrolls_still_allows_search_form_and_result_actions():
+    browser = SearchBrowser()
+    result = run_search(
+        browser,
+        "Find the official solar capacity figure",
+        max_scrolls=0,
+        choose_action=lambda *_args, **_kwargs: {
+            "operation": "CLICK", "target": 1, "target_name": "Official Solar Report", "text_mode": None,
+        },
+        write_text=lambda _context: ("official solar report", {"model": "fixture"}),
+    )
+
+    assert result["status"] == "source_read"
+    assert result["source"]["scrolls"] == 0
     assert [step["operation"] for step in result["steps"]] == ["TYPE_TEXT", "SUBMIT", "CLICK"]
