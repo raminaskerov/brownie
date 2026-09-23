@@ -80,9 +80,13 @@
   const destinationFor = element => {
     if (element.tagName !== 'A' || !element.href) return '';
     const destination = new URL(element.href, location.href);
-    return destination.origin === location.origin
-      ? `${destination.pathname}${destination.search}`
-      : `${destination.origin}${destination.pathname}`;
+    if (destination.origin === location.origin) {
+      const pathname = location.protocol === 'file:'
+        ? destination.pathname.replace(/^\/[A-Za-z]:/, '')
+        : destination.pathname;
+      return `${pathname}${destination.search}`;
+    }
+    return `${destination.origin}${destination.pathname}`;
   };
   const contextFor = (element, name) => {
     if (element.tagName !== 'A') return '';

@@ -72,6 +72,18 @@ def test_observe_adds_generic_link_destination_and_context(tmp_path):
     assert second["destination"] == "/results?query=rtx+5070&offset=20"
 
 
+def test_observe_removes_windows_drive_from_file_fixture_destination(tmp_path):
+    with BrowserSession(profile_dir=tmp_path / "profile") as browser:
+        browser.open(PAGINATION_FIXTURE.as_uri())
+        browser.page.eval_on_selector(
+            'a[href="/item/rtx-5070"]',
+            "(link) => link.setAttribute('href', 'file:///D:/item/rtx-5070')",
+        )
+        observation = browser.observe()
+
+    assert observation["elements"][0]["destination"] == "/item/rtx-5070"
+
+
 def test_scroll_down_once_reveals_below_fold_controls(tmp_path):
     with BrowserSession(profile_dir=tmp_path / "profile") as browser:
         browser.open(FIXTURE.as_uri())

@@ -98,5 +98,7 @@ def test_managed_chrome_kills_process_that_does_not_stop(monkeypatch):
 
 def test_explicit_chrome_executable_must_exist(tmp_path):
     missing = tmp_path / "missing-chrome"
-    with pytest.raises(RuntimeError, match=str(missing)):
+    with pytest.raises(RuntimeError) as error:
         find_chrome_executable(missing)
+
+    assert str(missing) in str(error.value)
