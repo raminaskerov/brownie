@@ -390,7 +390,7 @@ freshness after model calls and never repeats a browser mutation.
 
 ## Controller guards
 
-Brownie has a code-owned controller state for the future multi-step runner. It
+Brownie's bounded automatic search runner uses a code-owned controller state. It
 remembers visited page/view fingerprints, per-page scroll extents and counts,
 recent factual outcomes, and observed form values even after their controls move
 offscreen. It never stores executable node references as memory.

@@ -33,8 +33,4 @@ History contains only `init` and `BMW_M4`, so no consistent commit convention ex
 
 ## Browser Boundaries & Configuration
 
-Keep Brownie independently runnable. Execute only validated operations against fresh observations; never retry mutations or accept model-provided selectors or JavaScript. Controller guards are not yet connected to an automatic runner. Keep `.env` and browser profiles private and untracked; bind debugging endpoints to localhost. Never disable Chrome's security sandbox.
-
-## Continuation
-
-Read `HANDOFF.md` when resuming work. It records implementation state, validation, and the unresolved search-bar discovery failure. Verify current code before treating the handoff as current authority.
+Keep Brownie independently runnable. Execute only validated operations against fresh observations; never retry mutations or accept model-provided selectors or JavaScript. The bounded automatic search runner applies the controller guards and uses the user's original goal inside a fixed, code-owned search objective; there is no planner or generated-subgoal layer. Keep `.env` and browser profiles private and untracked; bind debugging endpoints to localhost. Never disable Chrome's security sandbox.
