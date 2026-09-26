@@ -57,3 +57,17 @@ result status, last page, and planner proposals identified as proposals. It is
 not fed back into future model calls or treated as verified knowledge. Files are
 private, ignored by Git, and retained until you remove them. A run interrupted
 by a process crash before cleanup may have only `last-run.jsonl`.
+
+`GET /api/runs` lists up to 50 recent compact indexes. The control room can
+open any listed exact trace at `/archive/<run_id>?t=<token>`. These endpoints
+stay on localhost and require the same private token. The archive viewer
+renders recorded events; it does not rerun the browser or planner.
+
+Use `GET /api/memory` to list user-accepted decisions. `POST /api/memory`
+accepts `{"decision":"...","source_run_id":"..."}`; the run ID is optional
+but must name an existing archive when supplied. `POST /api/memory/remove`
+accepts `{"id":"..."}`. The control room exposes the same actions. The ledger
+is stored privately at `artifacts/accepted-decisions.json`, with at most 30
+decisions of 500 characters each. Research planning reads a snapshot at run
+start. Those decisions are prior user context and cannot count as cited
+source evidence. No model output is promoted automatically.

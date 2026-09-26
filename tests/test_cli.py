@@ -215,6 +215,7 @@ def test_research_needs_no_url_and_passes_source_budget(monkeypatch, capsys):
     ])
     monkeypatch.setattr(cli, "BrowserSession", lambda **options: captured.setdefault("browser", options) and Context())
     monkeypatch.setattr(cli, "load_env", lambda _: None)
+    monkeypatch.setattr(cli, "load_decisions", lambda: [])
 
     def research(_browser, goal, **options):
         captured["goal"], captured["options"] = goal, options
@@ -230,7 +231,7 @@ def test_research_needs_no_url_and_passes_source_budget(monkeypatch, capsys):
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "needs_user"
     assert captured["goal"] == "Compare reports"
-    assert captured["options"] == {"provider": "llm", "max_sources": 4}
+    assert captured["options"] == {"provider": "llm", "max_sources": 4, "accepted_decisions": []}
     assert captured["browser"]["headed"] is True
 
 

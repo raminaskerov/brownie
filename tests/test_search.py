@@ -180,3 +180,32 @@ def test_zero_source_scrolls_still_allows_search_form_and_result_actions():
     assert result["status"] == "source_read"
     assert result["source"]["scrolls"] == 0
     assert [step["operation"] for step in result["steps"]] == ["TYPE_TEXT", "SUBMIT", "CLICK"]
+
+
+def test_search_trace_records_observed_result_choice_after_validated_click(tmp_path):
+    import json
+
+    from brownie_agent.trace import TraceRecorder
+
+    trace_path = tmp_path / "search.jsonl"
+    with TraceRecorder(trace_path):
+        result = run_search(
+            SearchBrowser(),
+            "Find the official solar capacity figure",
+            choose_action=lambda *_args, **_kwargs: {
+                "operation": "CLICK", "target": 1, "target_name": "Official Solar Report",
+                "text_mode": None, "source": "fixture",
+            },
+            write_text=lambda _context: ("official solar report", {"model": "fixture"}),
+        )
+
+    events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    selections = [event["data"] for event in events if event["event"] == "search_result_selection"]
+    assert result["status"] == "source_read"
+    assert len(selections) == 1
+    assert selections[0]["chosen"] == {
+        "index": 1, "name": "Official Solar Report",
+        "context": "Example Institute report", "url": "https://example.test/report",
+    }
+    assert selections[0]["candidates"] == [selections[0]["chosen"]]
+    assert selections[0]["query"] == "official solar report"

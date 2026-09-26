@@ -9,7 +9,7 @@ stops, and a local control room at the cost of a smaller action set.
 
 | Tool | What it already offers | Brownie decision |
 | --- | --- | --- |
-| [Playwright](https://playwright.dev/python/docs/intro) | Cross-browser automation, semantic locators, tracing, mature input APIs | Keep the foundation. Add opt-in Firefox and WebKit launch paths; use Playwright primitives where a captured failure requires them. |
+| [Playwright](https://playwright.dev/python/docs/intro) | Cross-browser automation, semantic locators, tracing, mature input APIs | Keep the foundation. Opt-in Firefox and WebKit launch paths passed a local capture-and-paste fixture; use Playwright primitives where a captured failure requires them. |
 | [agent-browser](https://github.com/vercel-labs/agent-browser) | Compact accessibility snapshots, refs, text extraction, screenshots, persistent sessions, a CLI | It has a broader manual/agent tool surface than Brownie. Brownie now captures and reports named visible values for Basic tasks. Do not replace Brownie's validated executor with arbitrary selectors or JS. |
 | [Playwright MCP](https://github.com/microsoft/playwright-mcp) | Accessibility snapshots and many browser tools usable by an external agent | Useful as a baseline for generic exploration. Brownie's smaller closed action contract remains useful for unattended, audited tasks. |
 | [Browser Use](https://github.com/browser-use/browser-use) | General multi-step agent, human-help tools, structured results, local or hosted browsers | Its general task coverage is ahead of Brownie's. Borrow bounded user return and structured results; keep deterministic Basic tasks model-free. |
@@ -28,27 +28,35 @@ stops, and a local control room at the cost of a smaller action set.
   it does not directly select raw browser actions.
 - **API:** existing localhost run/state/stop/reply routes now publish a private
   token file and structured result for programmatic use. See [Local API](local-api.md).
-- **Other browsers:** opt-in Firefox and WebKit launch paths added. Their browser
-  builds are absent locally, so only launch-contract tests have run.
+- **Other browsers:** opt-in Firefox and WebKit launch paths added. Both passed
+  a local capture-and-paste fixture. WebKit still needs host dependencies for
+  ordinary use on this machine; see [the reliability matrix](reliability-matrix.md).
 - **Information foraging:** useful lens for deciding whether a source is worth
-  opening and when another query has low expected value. The current evidence
-  needs and source budget are a first approximation. An automatic scent score
-  would be unjustified without traces showing poor result choice or wasted
-  searches; compare source relevance and cost on a fixed task set first.
+  opening and when another query has low expected value. Brownie now records
+  observed search-result candidates and the clicked source in a compact trace
+  event. A [human-labeled evaluator](../benchmarks/foraging.md) measures whether
+  that choice was best among visible candidates and counts model requests. This
+  instrumentation also scored three fixed live tasks on 2026-09-26. Jev
+  steering chose a human-rated best visible official result in all three;
+  the full runs made 10 model requests including query generation and stale
+  decisions. Gemini steering, tested without execution on the same three
+  result-page observations, chose the same official URLs in three requests.
+  This small set does not justify automatic scent scoring or provider routing.
 - **Memory:** the factual ResearchState is compact within a run. The control
-  room now archives each completed run's exact private trace and a small index
-  of run status and planner proposals under `artifacts/runs/`. That gives full
-  remembrance and a navigable decision record without treating model proposals
-  as accepted facts. Runs still cannot resume after restart. A future reusable
-  memory ledger needs an explicit distinction between source claims, model
-  inference, and user-accepted decisions before it can steer future runs.
+  room archives exact private traces and small indexes under `artifacts/runs/`,
+  lists recent runs, and renders past traces. A separate bounded ledger stores
+  only decisions the user explicitly accepts; Research receives them as context,
+  never as source evidence or browser authority. Planner proposals and source
+  claims remain in the archive. Runs still cannot resume after restart.
 - **Artificial delays:** Playwright supports per-key delays and mouse timing,
   but adding human-like delays globally has no observed benefit here. Time and
   failure rates should be measured on the affected site before adding one.
 - **Press and hold:** Playwright exposes mouse down/up and gesture durations.
-  Brownie needs a captured Sahibinden state and a classified hold target before
-  exposing a validated `PRESS_HOLD` action; duration must be bounded and mouse-up
-  guaranteed even on failure.
+  A read-only Sahibinden homepage observation on 2026-09-26 returned a temporary
+  access block with a support code and no hold control. Brownie now classifies
+  that captured state locally as `access_blocked`. A validated `PRESS_HOLD` action
+  still needs an observation of the actual hold target and its outcome;
+  duration must be bounded and mouse-up guaranteed even on failure.
 - **Android:** Mobile Jev is a separate device stack, not a browser backend.
   Treat a Brownie Android mode as a later product decision after a concrete
   mobile-only task justifies it.
@@ -59,8 +67,30 @@ stops, and a local control room at the cost of a smaller action set.
 
 ## Evidence needed before a general superiority claim
 
-Use a fixed set of ordinary tasks and compare Brownie Basic, a direct Playwright
-script, agent-browser, and Browser Use on completed outcomes, false success,
+The [local Basic baseline](../benchmarks/README.md) now compares Brownie with a
+direct Playwright script on four fixed Chrome fixtures: copy/report, search
+submission, delayed navigation, and ambiguity. On 2026-09-26, both verified
+all three repetitions of every case and made zero model calls. Brownie median
+times were 916, 915, 1219, and 748 ms; direct Playwright was 810, 818, 1089,
+and 760 ms in the same order. These are local startup-to-close times, not
+general performance estimates. Direct Playwright remains the simpler choice
+for a known stable page; Brownie adds a reusable contract and structured
+guardrails. The exact JSON records are in ignored artifacts/basic-comparison.json.
+
+A second [same-page comparison](../benchmarks/README.md) ran the local
+copy/paste fixture through Brownie Basic, direct Playwright, and
+agent-browser 0.38.1. All passed 3/3; medians were 1006, 950, and 892 ms
+respectively, with zero model calls. Agent-browser was fastest in this
+small fixture, while Brownie kept its stricter task contract and structured
+stops. Browser Use 0.13.10 also completed one independently checked copy
+task with Gemini 3.1 Flash Lite: 8.5 seconds from agent run start, two model
+invocations, and 15,729 reported tokens. Its zero-valued cost field did not
+price that model, so it is not a free-inference claim. These runs do not
+justify replacing Brownie or claiming it is the cheapest general tool.
+
+The next comparison must use the same fixed public-site tasks across Brownie,
+agent-browser, and Browser Use, measuring completed outcomes, false success,
 safe stops, model calls/tokens, elapsed time, and setup effort. Include page
 changes, ambiguous controls, and copy/report workflows. Public feature lists
-cannot establish that Brownie is faster, cheaper, or more reliable on those tasks.
+and these local fixtures cannot establish that Brownie is generally faster,
+cheaper, or more reliable.

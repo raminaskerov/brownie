@@ -1,6 +1,6 @@
 """One bounded search-to-source run built on Brownie's validated action boundary."""
 
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from .access import READY, classify_access
 from .actions import StaleObservation, element_description, execute_action, execute_prediction
@@ -70,6 +70,28 @@ def _source_result(state: RunState, report: dict, *, query: str | None) -> dict:
             "stop_reason": report["stop_reason"],
         },
     }
+
+
+def _external_result_links(observation: dict) -> list[dict]:
+    """Keep factual result candidates for later relevance evaluation."""
+    links = []
+    for element in observation["elements"]:
+        destination = urljoin(observation["url"], element.get("destination", ""))
+        if (
+            element.get("role") != "link"
+            or "CLICK" not in element.get("operations", ())
+            or not element.get("destination")
+            or urlsplit(destination).scheme not in {"http", "https"}
+            or _is_search_engine_page(destination)
+        ):
+            continue
+        links.append({
+            "index": element["index"],
+            "name": element.get("name", ""),
+            "context": element.get("context", ""),
+            "url": destination,
+        })
+    return links
 
 
 def _unique_search_field(observation: dict) -> dict | None:
@@ -227,6 +249,16 @@ def run_search(
             continue
         stale_refreshes = 0
 
+        if execution["executed"] and execution["operation"] == "CLICK":
+            candidates = _external_result_links(observation)
+            chosen = next((item for item in candidates if item["index"] == prediction["target"]), None)
+            if chosen is not None:
+                trace_event("search_result_selection", {
+                    "query": query,
+                    "provider": prediction.get("source", provider),
+                    "chosen": chosen,
+                    "candidates": candidates,
+                })
         if execution["executed"] and execution["operation"] in {"CLICK", "SUBMIT"}:
             execution["page_ready"] = browser.wait_for_page_ready(
                 observation["url"],

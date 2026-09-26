@@ -24,6 +24,7 @@ EVENT_TITLES = {
     "model_response": "Exact model response",
     "model_attempt": "Model attempt",
     "steering_result": "Steering choice",
+    "search_result_selection": "Search result selected",
     "execution_check": "Freshness and action check",
     "execution_result": "Executed action",
     "basic_step": "Basic task step",

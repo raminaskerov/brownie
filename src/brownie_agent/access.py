@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlsplit
 READY = "ready"
 AUTH_REQUIRED = "auth_required"
 CHALLENGE = "challenge"
+ACCESS_BLOCKED = "access_blocked"
 
 
 def classify_access(observation: dict) -> dict:
@@ -14,6 +15,14 @@ def classify_access(observation: dict) -> dict:
     path = parsed.path.lower()
     title = observation["title"].strip().lower()
     signals = observation.get("access", {})
+    visible_text = observation.get("text", "").casefold()
+
+    if (
+        "olağandışı bir durum tespit ettik" in visible_text
+        and "şu anda talebinizi gerçekleştiremiyoruz" in visible_text
+        and "destek kodu:" in visible_text
+    ):
+        return {"status": ACCESS_BLOCKED, "reason": "temporary_access_block"}
 
     if (
         signals.get("challenge_marker")

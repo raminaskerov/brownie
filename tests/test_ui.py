@@ -315,3 +315,97 @@ def test_finished_run_archives_full_trace_and_compact_proposal_index(tmp_path):
     assert "excerpts" not in repr(summary)
     if os.name != "nt":
         assert (archive_dir / f"{manager._run_id}.jsonl").stat().st_mode & 0o077 == 0
+
+
+def test_memory_api_requires_token_and_persists_explicit_decisions(tmp_path):
+    from http.client import HTTPConnection
+    from threading import Thread
+
+    from brownie_agent.ui import BrownieServer, UIRequestHandler
+
+    server = BrownieServer(("127.0.0.1", 0), UIRequestHandler)
+    server.manager = RunManager(tmp_path)
+    server.token = "test-token"
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def request(method, path, body=None, token="test-token"):
+        connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        headers = {"X-Brownie-Token": token}
+        payload = json.dumps(body).encode("utf-8") if body is not None else None
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+        try:
+            connection.request(method, path, payload, headers)
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())
+        finally:
+            connection.close()
+
+    try:
+        status, _body = request("GET", "/api/memory", token="wrong")
+        assert status == 403
+        status, created = request("POST", "/api/memory", {"decision": "Use official sources first."})
+        assert status == 200
+        assert created["decision"]["decision"] == "Use official sources first."
+        status, listed = request("GET", "/api/memory")
+        assert status == 200
+        assert listed["decisions"] == [created["decision"]]
+        status, _body = request("POST", "/api/memory/remove", {"id": created["decision"]["id"]})
+        assert status == 200
+        assert request("GET", "/api/memory")[1]["decisions"] == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_archived_runs_api_lists_indexes_and_renders_private_trace(tmp_path):
+    from http.client import HTTPConnection
+    from threading import Thread
+
+    from brownie_agent.trace import TraceRecorder
+    from brownie_agent.ui import BrownieServer, UIRequestHandler
+
+    run_id = "20260926T090000Z-abcdef01"
+    archive_dir = tmp_path / "artifacts" / "runs"
+    archive_dir.mkdir(parents=True)
+    with TraceRecorder(archive_dir / f"{run_id}.jsonl"):
+        from brownie_agent.trace import trace_event
+
+        trace_event("run", {"mode": "research", "goal": "Check policy"})
+    (archive_dir / f"{run_id}.json").write_text(json.dumps({
+        "run_id": run_id, "mode": "research", "goal": "Check policy",
+        "result_status": "stopped", "trace": f"{run_id}.jsonl",
+    }), encoding="utf-8")
+
+    server = BrownieServer(("127.0.0.1", 0), UIRequestHandler)
+    server.manager = RunManager(tmp_path)
+    server.token = "private-token"
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def request(path, token=None):
+        connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        headers = {"X-Brownie-Token": token} if token else {}
+        try:
+            connection.request("GET", path, headers=headers)
+            response = connection.getresponse()
+            return response.status, response.read().decode("utf-8")
+        finally:
+            connection.close()
+
+    try:
+        assert request("/api/runs")[0] == 403
+        status, payload = request("/api/runs", "private-token")
+        assert status == 200
+        assert json.loads(payload)["runs"][0]["run_id"] == run_id
+        assert request(f"/archive/{run_id}")[0] == 403
+        status, rendered = request(f"/archive/{run_id}?t=private-token")
+        assert status == 200
+        assert "Check policy" in rendered
+        assert request("/archive/../../etc/passwd?t=private-token")[0] == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

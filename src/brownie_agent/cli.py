@@ -12,6 +12,7 @@ from .basic import load_basic_task, parse_basic_inputs, run_basic_task, validate
 from .browser import BrowserSession
 from .config import load_env
 from .managed_chrome import ManagedChrome
+from .memory import load_decisions
 from .reader import read_page
 from .research import run_research
 from .search import run_search
@@ -370,6 +371,7 @@ def main() -> None:
             research_options = {
                 "provider": args.steerer,
                 "max_sources": args.max_sources,
+                "accepted_decisions": load_decisions(),
             }
             if args.research_dialogue:
                 research_options["ask_user"] = read_research_answer

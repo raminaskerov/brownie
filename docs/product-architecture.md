@@ -200,7 +200,8 @@ entry point, bounded same-run clarification dialogue, and control-room output
 exist. Source credibility comparison, contradiction tracking, citation-following,
 and restartable serialized dialogue remain open. The planner has no direct
 browser authority; each source still uses the shared bounded search runner and
-executor.
+executor. A separate user-accepted decision ledger can inform future plans
+without promoting model proposals or source claims to accepted memory.
 
 ### Stage 5: conversational control room
 
@@ -214,7 +215,8 @@ source budget and collected source links; it can display a pending planner
 question, accept one bounded user message over the existing process channel,
 and resume the same research state. Exact source excerpts and dialogue remain in
 the private trace. Persistent conversations, restart recovery, and approval
-controls remain open.
+controls remain open. The control room now lists recent archived runs, renders
+exact historical traces, and lets the user save or remove accepted decisions.
 
 ## Completed foundation and next order
 

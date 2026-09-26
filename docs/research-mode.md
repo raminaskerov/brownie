@@ -38,6 +38,9 @@ source excerpts. It can return exactly one of four advisory decisions:
 - **ASK_USER:** request a user choice that materially changes the research;
 - **STOP:** end when another search will not resolve the evidence gap.
 
+The planner also receives at most 30 short decisions explicitly saved by the
+user in the control room. Each has a timestamp and optional archived run ID.
+These are prior user context, not source evidence, citations, or browser authority.
 The planner cannot return selectors, browser actions, JavaScript, credentials,
 or new task authority. `SEARCH_WEB` is executed by the existing bounded search
 runner, which starts at Brownie's code-owned search page, validates one action
@@ -70,5 +73,8 @@ PDF with a specialized parser, score publisher credibility, identify
 contradictions mechanically, or preserve a run for later resumption.
 
 The dialogue is run-scoped and is not persisted for later restart or recovery.
+Accepted decisions persist across runs, but source claims and planner proposals
+are not automatically turned into memory. An archived trace remains available
+for review; saving a decision requires an explicit user action.
 Access barriers, login, challenges, source-search failure, duplicate results,
 and exhausted budgets stop explicitly rather than broadening authority.

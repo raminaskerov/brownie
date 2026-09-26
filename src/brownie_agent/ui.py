@@ -21,8 +21,10 @@ from urllib.parse import parse_qs, urlsplit
 from .basic import parse_basic_inputs
 from .config import default_ui_runtime_dir
 from .launcher import worker_command
+from .memory import RUN_ID, add_decision, load_decisions, remove_decision
 from .research import MAX_USER_ANSWER_CHARS
 from .settings import provider_status, save_provider_keys, validate_provider_settings
+from .trace import _render_html
 
 MAX_BODY_BYTES = 64 * 1024
 MAX_LOG_LINES = 160
@@ -457,6 +459,40 @@ class RunManager:
     def save_settings(self, payload: dict) -> dict[str, bool]:
         return save_provider_keys(self.runtime_dir, payload)
 
+    def list_decisions(self) -> list[dict]:
+        return load_decisions(self.runtime_dir)
+
+    def list_runs(self) -> list[dict]:
+        archive_dir = self.trace_path.parent / "runs"
+        summaries = []
+        for path in sorted(archive_dir.glob("*.json"), reverse=True):
+            if not RUN_ID.fullmatch(path.stem):
+                continue
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(value, dict) or value.get("run_id") != path.stem:
+                continue
+            summaries.append(value)
+            if len(summaries) >= 50:
+                break
+        return summaries
+
+    def archived_trace(self, run_id: str) -> list[dict] | None:
+        if not RUN_ID.fullmatch(run_id):
+            return None
+        path = self.trace_path.parent / "runs" / f"{run_id}.jsonl"
+        return _read_trace(path) if path.is_file() else None
+
+    def add_decision(self, payload: dict) -> dict:
+        with self._lock:
+            return add_decision(self.runtime_dir, payload.get("decision"), payload.get("source_run_id"))
+
+    def remove_decision(self, payload: dict) -> None:
+        with self._lock:
+            remove_decision(self.runtime_dir, payload.get("id"))
+
     def ensure_idle(self) -> None:
         with self._lock:
             if self._process is not None and self._process.poll() is None:
@@ -522,20 +558,25 @@ details.settings{border-top:1px solid var(--line);margin-top:18px;padding-top:14
 <label for="typesafe-key">TypeSafe key for Jev</label><input id="typesafe-key" type="password" autocomplete="off">
 <label for="gemini-key">Gemini key for LLM and typing</label><input id="gemini-key" type="password" autocomplete="off">
 <div class="key-status" id="key-status">Checking saved keys...</div><button class="secondary" id="save-settings">Save keys</button>
-</details></section>
+</details>
+<details class="settings"><summary>Accepted research memory</summary><p class="help">Save only decisions you accept. Archived model plans and source text are not promoted automatically. Research uses these as context, never as cited evidence or browser commands.</p><label for="memory-text">Decision</label><textarea id="memory-text" maxlength="500" placeholder="A decision you want future research runs to remember"></textarea><label for="memory-run">Archived run ID (optional)</label><input id="memory-run" type="text" placeholder="20260926T090000Z-abcdef01"><div class="buttons"><button class="secondary" id="save-memory">Save decision</button></div><ul class="facts" id="memory-list"><li>No accepted decisions saved.</li></ul><h3>Recent runs</h3><ul class="facts" id="run-list"><li>No archived runs yet.</li></ul></details></section>
 <div class="work"><section class="panel"><h2>Brownie says</h2><div class="reply" id="reply">No run yet.</div><div id="dialogue" class="hidden"><label for="reply-input">Your answer</label><textarea id="reply-input" maxlength="4000" placeholder="Answer the question above. This clarifies the research goal; it is not a browser command."></textarea><div class="buttons"><button id="send-reply">Continue research</button></div></div></section><section class="panel hidden" id="research-state"><h2>Research state</h2><div id="research-decision"></div><p class="muted" id="research-reason"></p><h3>Open evidence needs</h3><ul class="facts" id="research-needs"></ul><h3>Collected sources</h3><ul class="facts" id="research-sources"></ul></section><section class="panel"><h2>What happened</h2><ol class="timeline" id="events"><li>Waiting for a run.</li></ol></section>
 <section class="panel"><div class="tabs"><button id="inspector-tab" class="active">Inspector</button><button id="logs-tab">Process log</button><button id="refresh" class="secondary">Refresh inspector</button></div><iframe id="inspector" title="Last Brownie run inspector"></iframe><pre id="logs" class="hidden">No process output.</pre></section></div></main>
 <script>
-const TOKEN='__TOKEN__',$=id=>document.getElementById(id);let lastInspectorCount=-1,lastEvents='',lastLogs='';
+const TOKEN='__TOKEN__',$=id=>document.getElementById(id);let lastInspectorCount=-1,lastEvents='',lastLogs='',lastArchiveId=null;
 function setText(id,value){if($(id).textContent!==value)$(id).textContent=value}
 function setList(id,values,empty){$(id).replaceChildren(...((values&&values.length)?values:[empty]).map(text=>{const li=document.createElement('li');li.textContent=text;return li}))}
 function formState(){return{mode:$('mode').value,goal:$('goal').value,url:$('url').value,task_path:$('task-path').value,inputs:$('basic-inputs').value.split('\n').map(value=>value.trim()).filter(Boolean),browser:$('browser').value,steerer:$('steerer').value,keep_open:$('keep-open').checked,max_steps:Number($('max-steps').value),max_pages:Number($('max-pages').value),max_sources:Number($('max-sources').value)}}
 function keyState(){return{typesafe_api_key:$('typesafe-key').value,gemini_api_key:$('gemini-key').value}}
 async function updateSettings(){const response=await fetch('/api/state',{headers:{'X-Brownie-Token':TOKEN}}),state=await response.json(),settings=state.settings||{};setText('key-status','Jev: '+(settings.jev_configured?'ready':'key needed')+' · LLM: '+(settings.llm_configured?'ready':'key needed')+' · Typing: '+(settings.text_configured?'ready':'key needed'))}
 async function post(path,body={}){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Brownie-Token':TOKEN},body:JSON.stringify(body)}),value=await response.json();if(!response.ok)throw new Error(value.error||'Request failed');return value}
+async function updateRuns(){const response=await fetch('/api/runs',{headers:{'X-Brownie-Token':TOKEN}}),value=await response.json();if(!response.ok)throw new Error(value.error||'Could not load runs');const list=$('run-list');list.replaceChildren();if(!value.runs.length){const item=document.createElement('li');item.textContent='No archived runs yet.';list.append(item);return}for(const run of value.runs){const item=document.createElement('li'),label=document.createElement('span'),link=document.createElement('a'),use=document.createElement('button');label.textContent=run.run_id+' · '+(run.mode||'run')+' · '+(run.result_status||run.process_status||'finished')+' · '+(run.goal||'');link.href='/archive/'+encodeURIComponent(run.run_id)+'?t='+encodeURIComponent(TOKEN);link.target='_blank';link.rel='noreferrer';link.textContent=' Open trace';use.textContent='Use ID';use.className='secondary';use.style.marginLeft='8px';use.addEventListener('click',()=>{$('memory-run').value=run.run_id});item.append(label,link,use);list.append(item)}}
+async function updateMemory(){const response=await fetch('/api/memory',{headers:{'X-Brownie-Token':TOKEN}}),value=await response.json();if(!response.ok)throw new Error(value.error||'Could not load memory');const list=$('memory-list');list.replaceChildren();if(!value.decisions.length){const item=document.createElement('li');item.textContent='No accepted decisions saved.';list.append(item);return}for(const record of value.decisions){const item=document.createElement('li'),label=document.createElement('span'),remove=document.createElement('button');label.textContent=record.decision+(record.source_run_id?' · run '+record.source_run_id:'');remove.textContent='Remove';remove.className='secondary';remove.style.marginLeft='8px';remove.addEventListener('click',async()=>{try{await post('/api/memory/remove',{id:record.id});await updateMemory()}catch(error){$('error').textContent=error.message}});item.append(label,remove);list.append(item)}}
 function adaptForm(){const mode=$('mode').value,browser=$('browser').value,owned=['search','research','basic'];$('url-wrap').classList.toggle('hidden',owned.includes(mode));$('basic-wrap').classList.toggle('hidden',mode!=='basic');$('goal-wrap').classList.toggle('hidden',!['search','research','predict','step'].includes(mode));$('steerer-wrap').classList.toggle('hidden',!['search','research','predict','step'].includes(mode));$('budgets').classList.toggle('hidden',mode!=='search');$('research-budget').classList.toggle('hidden',mode!=='research');if(owned.includes(mode)&&browser==='attach')$('browser').value='managed';$('browser').querySelector('[value="attach"]').disabled=owned.includes(mode);$('keep-open').disabled=$('browser').value==='attach'||mode==='predict';const help={managed:'Uses a dedicated profile and starts ordinary headed Chrome through localhost CDP.',playwright:"Starts Playwright-owned headed Chrome with Brownie's isolated profile.",firefox:'Starts a separate Playwright Firefox profile. Install its browser build first.',webkit:'Starts a separate Playwright WebKit profile. Install its browser build first.',attach:'Reuses a matching tab in Chrome already started with remote debugging. Brownie does not close it.'};$('browser-help').textContent=help[$('browser').value]}
-async function update(){try{const response=await fetch('/api/state',{headers:{'X-Brownie-Token':TOKEN}}),state=await response.json();setText('status',state.message);$('start').disabled=state.active;$('close').disabled=!state.can_close;$('stop').disabled=!state.can_stop;$('dialogue').classList.toggle('hidden',!state.can_reply);$('send-reply').disabled=!state.can_reply;setText('reply',state.reply||(state.active?'Brownie is working...':'No result yet.'));const research=state.research_state;$('research-state').classList.toggle('hidden',!research);if(research){setText('research-decision',research.decision+(Number.isInteger(research.remaining)?' · '+research.remaining+' source slots left':''));setText('research-reason',research.reason);setList('research-needs',research.evidence_needs,'No open need reported.');setList('research-sources',research.sources.map(source=>'['+source.id+'] '+source.title+' · '+source.url),'No sources collected yet.')}const eventKey=JSON.stringify(state.events);if(eventKey!==lastEvents){$('events').replaceChildren(...(state.events.length?state.events:['Waiting for decisions.']).map(text=>{const li=document.createElement('li');li.textContent=text;return li}));lastEvents=eventKey}const logText=state.logs.join('\n')||'No process output.';if(logText!==lastLogs){$('logs').textContent=logText;lastLogs=logText}if(state.inspector_ready&&state.event_count!==lastInspectorCount&&['completed','failed','stopped','awaiting_close'].includes(state.status)){$('inspector').src='/inspector?t='+encodeURIComponent(TOKEN)+'&v='+state.event_count;lastInspectorCount=state.event_count}}catch(error){setText('error',error.message)}}
+async function update(){try{const response=await fetch('/api/state',{headers:{'X-Brownie-Token':TOKEN}}),state=await response.json();setText('status',state.message);$('start').disabled=state.active;$('close').disabled=!state.can_close;$('stop').disabled=!state.can_stop;$('dialogue').classList.toggle('hidden',!state.can_reply);$('send-reply').disabled=!state.can_reply;setText('reply',state.reply||(state.active?'Brownie is working...':'No result yet.'));if(state.last_archive&&state.last_archive!==lastArchiveId){lastArchiveId=state.last_archive;updateRuns().catch(error=>{setText('error',error.message)})}const research=state.research_state;$('research-state').classList.toggle('hidden',!research);if(research){setText('research-decision',research.decision+(Number.isInteger(research.remaining)?' · '+research.remaining+' source slots left':''));setText('research-reason',research.reason);setList('research-needs',research.evidence_needs,'No open need reported.');setList('research-sources',research.sources.map(source=>'['+source.id+'] '+source.title+' · '+source.url),'No sources collected yet.')}const eventKey=JSON.stringify(state.events);if(eventKey!==lastEvents){$('events').replaceChildren(...(state.events.length?state.events:['Waiting for decisions.']).map(text=>{const li=document.createElement('li');li.textContent=text;return li}));lastEvents=eventKey}const logText=state.logs.join('\n')||'No process output.';if(logText!==lastLogs){$('logs').textContent=logText;lastLogs=logText}if(state.inspector_ready&&state.event_count!==lastInspectorCount&&['completed','failed','stopped','awaiting_close'].includes(state.status)){$('inspector').src='/inspector?t='+encodeURIComponent(TOKEN)+'&v='+state.event_count;lastInspectorCount=state.event_count}}catch(error){setText('error',error.message)}}
 $('save-settings').addEventListener('click',async()=>{$('error').textContent='';try{await post('/api/settings',keyState());$('typesafe-key').value='';$('gemini-key').value='';await updateSettings()}catch(error){$('error').textContent=error.message}});updateSettings();
+$('save-memory').addEventListener('click',async()=>{$('error').textContent='';try{await post('/api/memory',{decision:$('memory-text').value,source_run_id:$('memory-run').value});$('memory-text').value='';$('memory-run').value='';await updateMemory()}catch(error){$('error').textContent=error.message}});updateMemory().catch(error=>{$('error').textContent=error.message});
+updateRuns().catch(error=>{$('error').textContent=error.message});
 $('quit').addEventListener('click',async()=>{try{await post('/api/quit');document.body.innerHTML='<main><section class="panel"><h1>Brownie has stopped.</h1><p>You can close this tab.</p></section></main>'}catch(error){$('error').textContent=error.message}});
 $('send-reply').addEventListener('click',async()=>{$('error').textContent='';try{await post('/api/reply',{answer:$('reply-input').value});$('reply-input').value='';await update()}catch(error){$('error').textContent=error.message}});
 $('mode').addEventListener('change',adaptForm);$('browser').addEventListener('change',adaptForm);$('start').addEventListener('click',async()=>{$('error').textContent='';try{await post('/api/run',formState());await update()}catch(error){$('error').textContent=error.message}});$('close').addEventListener('click',async()=>{try{await post('/api/close')}catch(error){$('error').textContent=error.message}});$('stop').addEventListener('click',async()=>{try{await post('/api/stop')}catch(error){$('error').textContent=error.message}});$('refresh').addEventListener('click',()=>{$('inspector').src='/inspector?t='+encodeURIComponent(TOKEN)+'&v='+Date.now()});$('inspector-tab').addEventListener('click',()=>{$('inspector').classList.remove('hidden');$('logs').classList.add('hidden');$('inspector-tab').classList.add('active');$('logs-tab').classList.remove('active')});$('logs-tab').addEventListener('click',()=>{$('logs').classList.remove('hidden');$('inspector').classList.add('hidden');$('logs-tab').classList.add('active');$('inspector-tab').classList.remove('active')});adaptForm();update();setInterval(update,800);
@@ -575,6 +616,32 @@ class UIRequestHandler(BaseHTTPRequestHandler):
                 self._json({"error": "Unauthorized"}, HTTPStatus.FORBIDDEN)
             else:
                 self._json(self.server.manager.snapshot())
+        elif path == "/api/memory":
+            if not self._authorized():
+                self._json({"error": "Unauthorized"}, HTTPStatus.FORBIDDEN)
+            else:
+                try:
+                    self._json({"decisions": self.server.manager.list_decisions()})
+                except ValueError as exc:
+                    self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
+        elif path == "/api/runs":
+            if not self._authorized():
+                self._json({"error": "Unauthorized"}, HTTPStatus.FORBIDDEN)
+            else:
+                self._json({"runs": self.server.manager.list_runs()})
+        elif path.startswith("/archive/"):
+            supplied = parse_qs(parsed.query).get("t", [""])[0]
+            if not secrets.compare_digest(supplied, self.server.token):
+                self._headers(HTTPStatus.FORBIDDEN, "text/plain; charset=utf-8")
+                self.wfile.write(b"Unauthorized")
+                return
+            events = self.server.manager.archived_trace(path.removeprefix("/archive/"))
+            if events is None:
+                self._headers(HTTPStatus.NOT_FOUND, "text/plain; charset=utf-8")
+                self.wfile.write(b"Archived trace not found")
+                return
+            self._headers(HTTPStatus.OK, "text/html; charset=utf-8")
+            self.wfile.write(_render_html(events).encode("utf-8"))
         elif path == "/inspector":
             supplied = parse_qs(parsed.query).get("t", [""])[0]
             if not secrets.compare_digest(supplied, self.server.token):
@@ -614,8 +681,13 @@ class UIRequestHandler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(size) or b"{}")
             if not isinstance(payload, dict):
                 raise ValueError("Request body must be an object")
+            response = {"ok": True}
             if self.path == "/api/run":
                 self.server.manager.start(payload)
+            elif self.path == "/api/memory":
+                response["decision"] = self.server.manager.add_decision(payload)
+            elif self.path == "/api/memory/remove":
+                self.server.manager.remove_decision(payload)
             elif self.path == "/api/settings":
                 self.server.manager.save_settings(payload)
             elif self.path == "/api/close":
@@ -633,7 +705,7 @@ class UIRequestHandler(BaseHTTPRequestHandler):
         except (RuntimeError, ValueError) as exc:
             self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
             return
-        self._json({"ok": True})
+        self._json(response)
 
 
 def _write_api_token(path: Path, token: str) -> None:

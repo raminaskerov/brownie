@@ -9,7 +9,9 @@ conversational **research mode** with layered perception and planning. They
 will not be separate forks. See [the product architecture](docs/product-architecture.md)
 for the mode contracts, reliability program, and staged roadmap. The
 [tool comparison](docs/tool-comparison.md) records current alternatives and
-near-term adoption decisions. The [reliability matrix](docs/reliability-matrix.md) separates
+near-term adoption decisions. The [Basic baseline](benchmarks/README.md) compares
+four fixed tasks with direct Playwright, and the [foraging evaluator](benchmarks/foraging.md)
+supports human-labeled search-result choices. The [reliability matrix](docs/reliability-matrix.md) separates
 repeatable fixture coverage from dated live smoke evidence.
 
 ## Current milestone: Basic workflows and bounded multi-source research
@@ -92,8 +94,9 @@ and sources, validates citation identifiers, and caps planner cycles. Each
 source is still obtained through Brownie's existing bounded `goal -> search ->
 one result -> one source -> stop` runner.
 
-This is not yet a general autonomous researcher. It has no long-lived memory,
-follow-citation tool, or contradiction engine. In the control room, the planner
+This is not yet a general autonomous researcher. It has a small, user-accepted
+cross-run decision ledger, but no restartable research state, follow-citation
+tool, or contradiction engine. In the control room, the planner
 can ask up to three clarification questions and continue the same run with the
 same browser and collected sources. User answers clarify the research state;
 they never become browser commands or new execution authority. See
@@ -135,9 +138,11 @@ uv run brownie --browser webkit --read-page https://example.com
 ```
 
 Each engine uses its own isolated profile. `--attach`, `--managed-cdp`, and
-`--channel` apply only to Chromium. Firefox and WebKit launch paths have offline
-contract tests but have not been live-tested in this checkout because their
-Playwright browser builds are not installed here.
+`--channel` apply only to Chromium. Firefox and WebKit both passed a local
+capture-and-paste fixture on 2026-09-26. WebKit needed two host libraries
+(`libavif16` and `libmanette-0.2-0`) that are absent from this machine's system
+installation; the fixture used temporary local copies. Install the browser's
+required system dependencies before expecting a normal WebKit launch.
 
 ### Inspect what Brownie sent and received
 
@@ -181,8 +186,10 @@ Use **Close Brownie browser** when a finished managed or Playwright window shoul
 close.
 
 The control room keeps exact private run traces and compact decision indexes
-under `artifacts/runs/` after each process finishes. Planner proposals are
-recorded as proposals, not promoted to trusted facts for later runs.
+under `artifacts/runs/` after each process finishes. You can review past runs
+and explicitly save or remove accepted decisions for future Research runs.
+Planner proposals and source text are never promoted automatically. Saved
+decisions are planning context, not cited evidence or browser commands.
 
 The control room accepts one run at a time, binds only to localhost, and does not
 offer a free-form command field. It invokes the same CLI, observer, freshness

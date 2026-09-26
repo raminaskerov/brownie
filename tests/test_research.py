@@ -246,3 +246,44 @@ def test_research_rejects_fragment_variant_of_collected_source():
 
     assert result["stop_reason"] == "duplicate_source"
     assert len(result["sources"]) == 1
+
+
+def test_user_accepted_memory_is_planning_context_but_not_source_evidence():
+    saved = [{
+        "id": "0123456789abcdef",
+        "created_at": "2026-09-26T09:00:00+00:00",
+        "decision": "Prefer official documentation for this topic.",
+        "source_run_id": None,
+    }]
+    seen = []
+
+    def planner(state):
+        seen.append(state.planner_state())
+        return proposal("ANSWER", answer="Memory alone proves it [S1].", citations=[1]) if state.sources else \
+            proposal("STOP")
+
+    result = run_research(
+        object(),
+        "Find official documentation",
+        accepted_decisions=saved,
+        planner=planner,
+        search=lambda *_args, **_kwargs: pytest.fail("No search should run"),
+    )
+
+    assert seen[0]["accepted_decisions"] == saved
+    assert seen[0]["sources"] == []
+    assert result["status"] == "stopped"
+    assert result["memory_decision_ids"] == ["0123456789abcdef"]
+
+
+def test_research_rejects_unbounded_or_malformed_accepted_memory_before_search():
+    with pytest.raises(ValueError, match="invalid size"):
+        run_research(
+            object(), "Find evidence", accepted_decisions=[{}] * 31,
+            planner=lambda _state: pytest.fail("Planner must not run"),
+        )
+    with pytest.raises(ValueError, match="invalid record"):
+        run_research(
+            object(), "Find evidence", accepted_decisions=[{"decision": "model proposal"}],
+            planner=lambda _state: pytest.fail("Planner must not run"),
+        )

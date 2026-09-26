@@ -1,4 +1,11 @@
-from brownie_agent.access import AUTH_REQUIRED, CHALLENGE, READY, classify_access, local_blocked_prediction
+from brownie_agent.access import (
+    ACCESS_BLOCKED,
+    AUTH_REQUIRED,
+    CHALLENGE,
+    READY,
+    classify_access,
+    local_blocked_prediction,
+)
 
 
 def observation(url="https://example.test/listings", title="Listings", **access):
@@ -29,3 +36,15 @@ def test_local_access_block_does_not_claim_model_confidence():
     assert prediction["model"] is None
     assert prediction["confidence"] is None
     assert prediction["executed"] is False
+
+
+def test_captured_sahibinden_temporary_block_stops_before_steering():
+    page = observation(url="https://www.sahibinden.com/", title="")
+    page["text"] = (
+        "Olağandışı bir durum tespit ettik...\n"
+        "Şu anda talebinizi gerçekleştiremiyoruz, kısa bir süre sonra tekrar deneyebilirsiniz.\n"
+        "Destek Kodu: F-example"
+    )
+    classified = classify_access(page)
+    assert classified == {"status": ACCESS_BLOCKED, "reason": "temporary_access_block"}
+    assert local_blocked_prediction(classified)["blocked_reason"] == ACCESS_BLOCKED
