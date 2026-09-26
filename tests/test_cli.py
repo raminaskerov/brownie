@@ -6,6 +6,7 @@ import pytest
 
 from brownie_agent import cli, llm_model
 from brownie_agent.actions import StaleObservation
+from brownie_agent.basic import parse_basic_task
 from brownie_agent.chat_model import ModelHTTPError
 from brownie_agent.text_model import generate_field_text
 
@@ -35,7 +36,10 @@ def browser(monkeypatch):
             pass
 
         def observe(self):
-            return {**deepcopy(self.page), "fingerprint": "changed" if self.changed else "initial"}
+            result = deepcopy(self.page)
+            if self.changed:
+                result["elements"][0]["name"] = "Changed search field"
+            return {**result, "fingerprint": "changed" if self.changed else "initial"}
 
         def type_node(self, node, value):
             self.mutations.append(("TYPE_TEXT", node, value))
@@ -195,6 +199,81 @@ def test_search_needs_no_url_and_launches_headed_isolated_browser(monkeypatch, c
     assert captured["exited"] is True
 
 
+def test_research_needs_no_url_and_passes_source_budget(monkeypatch, capsys):
+    captured = {}
+
+    class Context:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            pass
+
+    monkeypatch.setattr("sys.argv", [
+        "brownie", "--research", "--steerer", "llm", "--goal", "Compare reports",
+        "--max-sources", "4", "--json",
+    ])
+    monkeypatch.setattr(cli, "BrowserSession", lambda **options: captured.setdefault("browser", options) and Context())
+    monkeypatch.setattr(cli, "load_env", lambda _: None)
+
+    def research(_browser, goal, **options):
+        captured["goal"], captured["options"] = goal, options
+        return {
+            "mode": "research", "goal": goal, "status": "needs_user",
+            "stop_reason": "user_input_required", "question": "Which year?",
+            "answer": None, "cited_sources": [], "sources": [],
+        }
+
+    monkeypatch.setattr(cli, "run_research", research)
+    cli.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "needs_user"
+    assert captured["goal"] == "Compare reports"
+    assert captured["options"] == {"provider": "llm", "max_sources": 4}
+    assert captured["browser"]["headed"] is True
+
+
+def test_research_dialogue_reads_one_answer_for_the_controller(monkeypatch, capsys):
+    captured = {}
+
+    class Context:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            pass
+
+    monkeypatch.setattr("sys.argv", [
+        "brownie", "--research", "--research-dialogue", "--goal", "Compare reports", "--json",
+    ])
+    monkeypatch.setattr(cli, "BrowserSession", lambda **_options: Context())
+    monkeypatch.setattr(cli, "load_env", lambda _: None)
+    monkeypatch.setattr("builtins.input", lambda: "Use 2025")
+
+    def research(_browser, goal, **options):
+        captured["answer"] = options["ask_user"]("Which year?")
+        return {
+            "mode": "research", "goal": goal, "status": "stopped",
+            "stop_reason": "fixture", "question": None, "answer": None,
+            "cited_sources": [], "sources": [],
+        }
+
+    monkeypatch.setattr(cli, "run_research", research)
+    cli.main()
+
+    assert json.loads(capsys.readouterr().out)["stop_reason"] == "fixture"
+    assert captured["answer"] == "Use 2025"
+
+
+def test_research_dialogue_flag_requires_research(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["brownie", "--research-dialogue", "https://example.test/"])
+    monkeypatch.setattr(cli, "BrowserSession", lambda **_: pytest.fail("Invalid flags must stop before launch"))
+
+    with pytest.raises(SystemExit):
+        cli.main()
+
+
 def test_managed_cdp_search_starts_chrome_then_attaches(monkeypatch, capsys):
     captured = {"events": []}
 
@@ -242,3 +321,67 @@ def test_managed_cdp_search_starts_chrome_then_attaches(monkeypatch, capsys):
     assert captured["managed_options"]["endpoint"] == "http://127.0.0.1:9222"
     assert captured["browser_options"]["cdp_url"] == "http://127.0.0.1:9222"
     assert captured["events"] == ["chrome_started", "browser_attached", "browser_detached", "chrome_stopped"]
+
+
+def test_basic_task_needs_no_url_and_uses_no_model_configuration(monkeypatch, capsys):
+    captured = {}
+    task = parse_basic_task({
+        "version": 1,
+        "name": "Fixture task",
+        "start_url": "https://example.test/",
+        "allowed_origins": ["https://example.test"],
+        "inputs": ["query"],
+        "steps": [{"operation": "DONE"}],
+    })
+
+    class Context:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            pass
+
+    monkeypatch.setattr("sys.argv", [
+        "brownie",
+        "--basic-task", "fixture.json",
+        "--input", "query=solar report",
+        "--json",
+    ])
+    monkeypatch.setattr(cli, "load_basic_task", lambda path: captured.setdefault("path", path) and task)
+    monkeypatch.setattr(
+        cli,
+        "parse_basic_inputs",
+        lambda values: captured.setdefault("raw_inputs", values) and {"query": "solar report"},
+    )
+    monkeypatch.setattr(cli, "BrowserSession", lambda **options: captured.setdefault("browser", options) and Context())
+    monkeypatch.setattr(cli, "load_env", lambda *_: pytest.fail("Basic mode must not load model configuration"))
+    monkeypatch.setattr(
+        cli,
+        "run_basic_task",
+        lambda _browser, received_task, inputs: {
+            "mode": "basic",
+            "task": received_task.name,
+            "status": "completed",
+            "stop_reason": "task_complete",
+            "steps": [],
+            "last_page": {"url": received_task.start_url, "title": "Fixture"},
+            "output": None,
+            "inputs_seen": inputs,
+        },
+    )
+
+    cli.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert captured["path"] == Path("fixture.json")
+    assert captured["raw_inputs"] == ["query=solar report"]
+    assert result["status"] == "completed"
+    assert result["inputs_seen"] == {"query": "solar report"}
+
+
+def test_input_without_basic_task_stops_before_browser_launch(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["brownie", "--input", "query=value", "https://example.test/"])
+    monkeypatch.setattr(cli, "BrowserSession", lambda **_: pytest.fail("Invalid flags must stop before browser launch"))
+
+    with pytest.raises(SystemExit):
+        cli.main()

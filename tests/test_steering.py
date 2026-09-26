@@ -214,7 +214,10 @@ def test_all_providers_use_the_same_freshness_check_before_execution(provider):
 
     class ChangedBrowser:
         def observe(self):
-            return {**page, "fingerprint": "changed"}
+            changed = deepcopy(page)
+            changed["elements"][1]["name"] = "Replaced target"
+            changed["fingerprint"] = "changed"
+            return changed
 
         def click_node(self, _node):
             pytest.fail("Stale choice must not execute")

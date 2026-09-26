@@ -15,14 +15,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from .basic import parse_basic_inputs
 from .config import default_ui_runtime_dir
 from .launcher import worker_command
+from .research import MAX_USER_ANSWER_CHARS
 from .settings import provider_status, save_provider_keys, validate_provider_settings
 
 MAX_BODY_BYTES = 64 * 1024
 MAX_LOG_LINES = 160
 MAX_REPLY_CHARS = 24_000
-MODES = {"search", "predict", "step", "read", "observe"}
+MODES = {"basic", "research", "search", "predict", "step", "read", "observe"}
 BROWSERS = {"managed", "playwright", "attach"}
 STEERERS = {"jev", "llm"}
 
@@ -46,23 +48,34 @@ def build_command(config: dict, *, trace_path: Path) -> list[str]:
     steerer = str(config.get("steerer", "jev"))
     goal = str(config.get("goal", "")).strip()
     url = str(config.get("url", "")).strip()
+    task_path = str(config.get("task_path", "")).strip()
     if mode not in MODES:
         raise ValueError("Unknown task mode")
     if browser not in BROWSERS:
         raise ValueError("Unknown browser mode")
     if steerer not in STEERERS:
         raise ValueError("Unknown steerer")
-    if mode == "search" and browser == "attach":
-        raise ValueError("Search cannot take ownership of an existing attached Chrome session")
-    if mode in {"search", "predict", "step"} and not goal:
+    if mode in {"basic", "research", "search"} and browser == "attach":
+        raise ValueError("Basic, research, and search tasks cannot take ownership of an existing attached Chrome session")
+    if mode in {"research", "search", "predict", "step"} and not goal:
         raise ValueError("This task needs a goal")
-    if mode != "search" and not url:
+    if mode not in {"basic", "research", "search"} and not url:
         raise ValueError("This task needs a start URL")
+    if mode == "basic" and (not task_path or "\x00" in task_path or "\n" in task_path or "\r" in task_path):
+        raise ValueError("Basic mode needs a valid task JSON path")
     if url and not url.startswith(("http://", "https://", "file://")):
         raise ValueError("Start URL must begin with http://, https://, or file://")
+    raw_inputs = config.get("inputs", [])
+    if mode == "basic":
+        if not isinstance(raw_inputs, list) or len(raw_inputs) > 50:
+            raise ValueError("Basic task inputs must be a list of at most 50 NAME=VALUE entries")
+        basic_inputs = parse_basic_inputs(raw_inputs)
+    else:
+        basic_inputs = {}
 
     max_steps = _bounded_int(config.get("max_steps", 8), "Action limit", minimum=1, maximum=100)
     max_pages = _bounded_int(config.get("max_pages", 3), "Page limit", minimum=1, maximum=30)
+    max_sources = _bounded_int(config.get("max_sources", 3), "Source limit", minimum=1, maximum=5)
     command = worker_command()
     if browser == "managed":
         command.append("--managed-cdp")
@@ -71,10 +84,19 @@ def build_command(config: dict, *, trace_path: Path) -> list[str]:
     else:
         command.extend(("--attach", "--use-open-tab"))
 
-    if mode == "search":
+    if mode == "basic":
+        command.extend(("--basic-task", task_path))
+        for name, value in basic_inputs.items():
+            command.extend(("--input", f"{name}={value}"))
+    elif mode == "search":
         command.extend((
             "--search", "--goal", goal, "--steerer", steerer,
             "--max-steps", str(max_steps), "--max-pages", str(max_pages),
+        ))
+    elif mode == "research":
+        command.extend((
+            "--research", "--goal", goal, "--steerer", steerer,
+            "--max-sources", str(max_sources), "--research-dialogue",
         ))
     elif mode in {"predict", "step"}:
         command.extend((f"--{mode}", "--goal", goal, "--steerer", steerer, url))
@@ -116,6 +138,15 @@ def _event_summary(item: dict) -> str | None:
     if event == "execution_result":
         result = data.get("result", {})
         return f"{result.get('operation', 'Action')}: {result.get('status', 'unknown')}"
+    if event == "basic_step":
+        return f"Basic step {data.get('index', 0) + 1}: {data.get('operation', 'unknown')}"
+    if event == "research_plan":
+        plan = data.get("plan", {})
+        return f"Research plan: {plan.get('decision', 'unknown')} - {plan.get('reason', '')}"
+    if event == "research_question":
+        return f"Brownie asks: {data.get('question', '')}"
+    if event == "research_answer":
+        return "You answered Brownie's research question"
     if event == "page_read_view":
         viewport = data.get("observation", {}).get("viewport", {})
         return f"Read viewport at scroll position {viewport.get('scroll_y', 0)}"
@@ -123,6 +154,48 @@ def _event_summary(item: dict) -> str | None:
         return "Run finished"
     if event == "error":
         return f"Error: {data.get('message', 'unknown error')}"
+    return None
+
+
+def _pending_research_question(events: list[dict]) -> tuple[int, str] | None:
+    pending = None
+    for item in events:
+        event = item.get("event")
+        if event == "research_question":
+            data = item.get("data", {})
+            value, turn = data.get("question"), data.get("turn")
+            pending = (turn, value) if type(turn) is int and isinstance(value, str) and value.strip() else None
+        elif event in {"research_answer", "run_result", "error"}:
+            pending = None
+    return pending
+
+
+def _visible_research_state(events: list[dict]) -> dict | None:
+    """Project the latest planner event into UI facts without exposing dialogue or model metadata."""
+    for item in reversed(events):
+        if item.get("event") != "research_plan":
+            continue
+        data = item.get("data", {})
+        plan, state = data.get("plan"), data.get("state")
+        if not isinstance(plan, dict) or not isinstance(state, dict):
+            return None
+        sources = state.get("sources", [])
+        needs = state.get("evidence_needs", [])
+        return {
+            "decision": str(plan.get("decision", "unknown")),
+            "reason": str(plan.get("reason", "")),
+            "evidence_needs": [str(value) for value in needs if isinstance(value, str)][:5],
+            "sources": [
+                {
+                    "id": str(source.get("id", "?")),
+                    "title": str(source.get("title", "Untitled")),
+                    "url": str(source.get("url", "")),
+                }
+                for source in sources
+                if isinstance(source, dict)
+            ][:5],
+            "remaining": state.get("source_budget_remaining"),
+        }
     return None
 
 
@@ -135,6 +208,33 @@ def _clip(text: str) -> str:
 def _result_reply(result: Any) -> str:
     if not isinstance(result, dict):
         return "Brownie finished, but its result was not structured as expected."
+    if result.get("mode") == "basic":
+        output = result.get("output")
+        if result.get("status") == "completed" and isinstance(output, dict) and output.get("material"):
+            return _clip(
+                f"Basic task completed: {result.get('task', 'Untitled')}\n"
+                f"{output.get('url', '')}\n\n{output.get('material', '')}"
+            )
+        page = result.get("last_page", {})
+        return (
+            f"Basic task {result.get('status', 'finished')}: {result.get('task', 'Untitled')}\n"
+            f"Reason: {result.get('stop_reason', 'unknown')}\n"
+            f"Last page: {page.get('title', 'Untitled')}\n{page.get('url', '')}"
+        )
+    if result.get("mode") == "research":
+        if result.get("status") == "answered":
+            sources = "\n".join(
+                f"[{source.get('id', '?')}] {source.get('title', 'Untitled')}\n{source.get('url', '')}"
+                for source in result.get("cited_sources", [])
+            )
+            suffix = f"\n\nSources:\n{sources}" if sources else ""
+            return _clip(f"{result.get('answer', '')}{suffix}")
+        if result.get("status") == "needs_user":
+            return f"I need one decision before continuing:\n\n{result.get('question', '')}"
+        return (
+            f"Research stopped: {result.get('stop_reason', 'unknown')}\n"
+            f"Sources collected: {len(result.get('sources', []))}"
+        )
     if "source" in result:
         source = result.get("source")
         if source:
@@ -180,6 +280,7 @@ class RunManager:
         self._message = "Ready"
         self._logs: list[str] = []
         self._stop_requested = False
+        self._reply_turn: int | None = None
 
     def _append_log(self, source: str, line: str) -> None:
         clean = line.rstrip()
@@ -203,7 +304,8 @@ class RunManager:
                 raise RuntimeError("A Brownie run is already active")
             self.trace_path.parent.mkdir(parents=True, exist_ok=True)
             self._logs = [f"command: {json.dumps(command, ensure_ascii=False)}"]
-            self._status, self._message, self._stop_requested = "starting", "Starting Brownie and Chrome...", False
+            self._status, self._message = "starting", "Starting Brownie and Chrome..."
+            self._stop_requested, self._reply_turn = False, None
             options: dict[str, Any] = {
                 "cwd": self.runtime_dir, "stdin": subprocess.PIPE, "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE, "text": True, "bufsize": 1, "env": environment,
@@ -251,6 +353,27 @@ class RunManager:
             process.stdin.flush()
             self._status, self._message = "closing", "Closing Brownie's browser..."
 
+    def reply(self, value: Any) -> None:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("Enter a non-empty answer")
+        raw_answer = value.strip()
+        if len(raw_answer) > MAX_USER_ANSWER_CHARS:
+            raise ValueError(f"Research answers are limited to {MAX_USER_ANSWER_CHARS} characters")
+        answer = " ".join(line.strip() for line in raw_answer.splitlines() if line.strip())
+        pending = _pending_research_question(_read_trace(self.trace_path))
+        with self._lock:
+            process = self._process
+            if process is None or process.poll() is not None:
+                raise RuntimeError("There is no active research run")
+            if pending is None or self._reply_turn == pending[0]:
+                raise RuntimeError("Brownie is not waiting for a research answer")
+            if process.stdin is None:
+                raise RuntimeError("The research reply channel is unavailable")
+            process.stdin.write(answer + "\n")
+            process.stdin.flush()
+            self._reply_turn = pending[0]
+            self._status, self._message = "running", "Continuing research..."
+
     def stop(self) -> None:
         with self._lock:
             process = self._process
@@ -271,19 +394,33 @@ class RunManager:
     def snapshot(self) -> dict:
         events = _read_trace(self.trace_path)
         summaries = [summary for item in events if (summary := _event_summary(item)) is not None]
+        pending = _pending_research_question(events)
+        research_state = _visible_research_state(events)
         result = None
         for item in reversed(events):
             if item.get("event") == "run_result":
                 result = item.get("data", {}).get("result")
                 break
         with self._lock:
+            active = self._process is not None and self._process.poll() is None
+            if pending is None:
+                self._reply_turn = None
+            can_reply = bool(pending and active and self._reply_turn != pending[0])
+            pending_question = pending[1] if pending else None
             return {
-                "status": self._status, "message": self._message,
-                "active": self._process is not None and self._process.poll() is None,
+                "status": "awaiting_user" if can_reply else self._status,
+                "message": "Brownie needs your answer" if can_reply else self._message,
+                "active": active,
                 "can_close": self._status == "awaiting_close",
                 "can_stop": self._status in {"starting", "running"},
+                "can_reply": can_reply,
+                "question": pending_question if can_reply else "",
+                "research_state": research_state,
                 "event_count": len(events), "events": summaries[-30:],
-                "reply": _result_reply(result) if result is not None else "",
+                "reply": (
+                    f"I need one decision before continuing:\n\n{pending_question}"
+                    if can_reply else _result_reply(result) if result is not None else ""
+                ),
                 "logs": list(self._logs), "inspector_ready": self.inspector_path.exists(),
                 "settings": provider_status(self.runtime_dir),
             }
@@ -293,16 +430,18 @@ HTML = r'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Brownie control room</title>
 <style>
-:root{--paper:#f1efe8;--ink:#1e211f;--muted:#68706b;--line:#d4d0c5;--panel:#fbfaf6;--green:#315d47;--red:#a33b32}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.45 system-ui,sans-serif}header{align-items:center;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;padding:18px 28px}h1{font-size:22px;margin:0}h2{font-size:16px;margin:0 0 14px}.status{background:#e2e7e1;border-radius:99px;color:var(--green);font-weight:700;padding:7px 12px}main{display:grid;gap:18px;grid-template-columns:minmax(300px,390px) minmax(420px,1fr);margin:0 auto;max-width:1500px;padding:20px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px}label{color:var(--muted);display:block;font-size:12px;font-weight:700;letter-spacing:.04em;margin:13px 0 5px;text-transform:uppercase}input,select,textarea{background:white;border:1px solid #bbb6aa;border-radius:7px;color:var(--ink);font:inherit;padding:9px 10px;width:100%}textarea{min-height:112px;resize:vertical}.row{display:grid;gap:10px;grid-template-columns:1fr 1fr}.toggle{align-items:center;display:flex;gap:8px;margin:13px 0}.toggle input{width:auto}button{background:var(--green);border:0;border-radius:7px;color:white;cursor:pointer;font:inherit;font-weight:700;padding:10px 14px}button.secondary{background:#dedbd1;color:var(--ink)}button.danger{background:var(--red)}button:disabled{cursor:not-allowed;opacity:.45}.buttons,.tabs{display:flex;flex-wrap:wrap;gap:8px;margin-top:15px}.help{color:var(--muted);font-size:13px}.work{display:grid;gap:18px;grid-template-rows:auto auto minmax(420px,1fr);min-width:0}.reply{background:#fff;border-left:4px solid var(--green);min-height:100px;padding:13px;white-space:pre-wrap;word-break:break-word}.timeline{color:var(--muted);margin:0;padding-left:22px}.timeline li{margin:5px 0}.tabs{margin:0 0 10px}.tabs button{background:#dedbd1;color:var(--ink)}.tabs button.active{background:var(--ink);color:white}iframe{background:white;border:1px solid var(--line);border-radius:7px;height:68vh;width:100%}pre{background:#171918;color:#e8e8e4;max-height:68vh;overflow:auto;padding:14px;white-space:pre-wrap;word-break:break-word}.hidden{display:none}.error{color:var(--red);min-height:22px}@media(max-width:850px){main{grid-template-columns:1fr}.row{grid-template-columns:1fr}}
+:root{--paper:#f1efe8;--ink:#1e211f;--muted:#68706b;--line:#d4d0c5;--panel:#fbfaf6;--green:#315d47;--red:#a33b32}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.45 system-ui,sans-serif}header{align-items:center;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;padding:18px 28px}h1{font-size:22px;margin:0}h2{font-size:16px;margin:0 0 14px}h3{font-size:13px;margin:14px 0 6px}.status{background:#e2e7e1;border-radius:99px;color:var(--green);font-weight:700;padding:7px 12px}main{display:grid;gap:18px;grid-template-columns:minmax(300px,390px) minmax(420px,1fr);margin:0 auto;max-width:1500px;padding:20px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px}label{color:var(--muted);display:block;font-size:12px;font-weight:700;letter-spacing:.04em;margin:13px 0 5px;text-transform:uppercase}input,select,textarea{background:white;border:1px solid #bbb6aa;border-radius:7px;color:var(--ink);font:inherit;padding:9px 10px;width:100%}textarea{min-height:112px;resize:vertical}.row{display:grid;gap:10px;grid-template-columns:1fr 1fr}.toggle{align-items:center;display:flex;gap:8px;margin:13px 0}.toggle input{width:auto}button{background:var(--green);border:0;border-radius:7px;color:white;cursor:pointer;font:inherit;font-weight:700;padding:10px 14px}button.secondary{background:#dedbd1;color:var(--ink)}button.danger{background:var(--red)}button:disabled{cursor:not-allowed;opacity:.45}.buttons,.tabs{display:flex;flex-wrap:wrap;gap:8px;margin-top:15px}.help,.muted{color:var(--muted);font-size:13px}.work{display:grid;gap:18px;grid-template-rows:auto auto auto minmax(420px,1fr);min-width:0}.reply{background:#fff;border-left:4px solid var(--green);min-height:100px;padding:13px;white-space:pre-wrap;word-break:break-word}.timeline{color:var(--muted);margin:0;padding-left:22px}.timeline li{margin:5px 0}.facts{margin:0;padding-left:20px}.facts li{margin:4px 0;word-break:break-word}.tabs{margin:0 0 10px}.tabs button{background:#dedbd1;color:var(--ink)}.tabs button.active{background:var(--ink);color:white}iframe{background:white;border:1px solid var(--line);border-radius:7px;height:68vh;width:100%}pre{background:#171918;color:#e8e8e4;max-height:68vh;overflow:auto;padding:14px;white-space:pre-wrap;word-break:break-word}.hidden{display:none}.error{color:var(--red);min-height:22px}@media(max-width:850px){main{grid-template-columns:1fr}.row{grid-template-columns:1fr}}
 details.settings{border-top:1px solid var(--line);margin-top:18px;padding-top:14px}details.settings summary{cursor:pointer;font-weight:700}.key-status{color:var(--muted);font-size:13px;margin:10px 0}
 </style></head><body>
 <header><h1>Brownie control room</h1><div class="status" id="status">Ready</div></header>
 <main><section class="panel"><h2>Start Brownie</h2>
-<label for="mode">Task</label><select id="mode"><option value="search">Search the web and read one source</option><option value="predict">Predict one move - execute nothing</option><option value="step">Execute one selected move</option><option value="read">Read successive page viewports</option><option value="observe">Observe one page</option></select>
+<label for="mode">Task</label><select id="mode"><option value="research">Research with several sources</option><option value="search">Search the web and read one source</option><option value="basic">Run a repeatable Basic task</option><option value="predict">Predict one move - execute nothing</option><option value="step">Execute one selected move</option><option value="read">Read successive page viewports</option><option value="observe">Observe one page</option></select>
 <div id="goal-wrap"><label for="goal">Goal</label><textarea id="goal" placeholder="Find the official..."></textarea></div>
 <div id="url-wrap" class="hidden"><label for="url">Start URL</label><input id="url" type="url" placeholder="https://example.com"></div>
+<div id="basic-wrap" class="hidden"><label for="task-path">Task JSON path</label><input id="task-path" type="text" placeholder="tasks/report.json"><label for="basic-inputs">Task inputs</label><textarea id="basic-inputs" placeholder="query=solar report&#10;region=Azerbaijan"></textarea><p class="help">One NAME=VALUE per line. Do not enter passwords, tokens, or payment data.</p></div>
 <div class="row"><div><label for="browser">Browser start</label><select id="browser"><option value="managed">Ordinary Chrome + CDP</option><option value="playwright">Playwright-owned Chrome</option><option value="attach">Existing debug Chrome</option></select></div><div id="steerer-wrap"><label for="steerer">Steering</label><select id="steerer"><option value="jev">Jev</option><option value="llm">LLM</option></select></div></div>
 <div class="row" id="budgets"><div><label for="max-steps">Actions</label><input id="max-steps" type="number" min="1" max="100" value="8"></div><div><label for="max-pages">Pages</label><input id="max-pages" type="number" min="1" max="30" value="3"></div></div>
+<div id="research-budget"><label for="max-sources">Sources</label><input id="max-sources" type="number" min="1" max="5" value="3"><p class="help">Research stops after this many distinct sources.</p></div>
 <label class="toggle"><input id="keep-open" type="checkbox" checked> Leave Brownie's Chrome open after it finishes</label><p class="help" id="browser-help"></p>
 <div class="error" id="error"></div><div class="buttons"><button id="start">Start run</button><button class="secondary" id="close" disabled>Close Brownie browser</button><button class="danger" id="stop" disabled>Stop run</button><button class="secondary" id="quit">Quit Brownie</button></div>
 <details class="settings"><summary>Model keys</summary><p class="help">Saved only on this computer. Brownie never shows a saved key again.</p>
@@ -310,19 +449,21 @@ details.settings{border-top:1px solid var(--line);margin-top:18px;padding-top:14
 <label for="gemini-key">Gemini key for LLM and typing</label><input id="gemini-key" type="password" autocomplete="off">
 <div class="key-status" id="key-status">Checking saved keys...</div><button class="secondary" id="save-settings">Save keys</button>
 </details></section>
-<div class="work"><section class="panel"><h2>Brownie says</h2><div class="reply" id="reply">No run yet.</div></section><section class="panel"><h2>What happened</h2><ol class="timeline" id="events"><li>Waiting for a run.</li></ol></section>
+<div class="work"><section class="panel"><h2>Brownie says</h2><div class="reply" id="reply">No run yet.</div><div id="dialogue" class="hidden"><label for="reply-input">Your answer</label><textarea id="reply-input" maxlength="4000" placeholder="Answer the question above. This clarifies the research goal; it is not a browser command."></textarea><div class="buttons"><button id="send-reply">Continue research</button></div></div></section><section class="panel hidden" id="research-state"><h2>Research state</h2><div id="research-decision"></div><p class="muted" id="research-reason"></p><h3>Open evidence needs</h3><ul class="facts" id="research-needs"></ul><h3>Collected sources</h3><ul class="facts" id="research-sources"></ul></section><section class="panel"><h2>What happened</h2><ol class="timeline" id="events"><li>Waiting for a run.</li></ol></section>
 <section class="panel"><div class="tabs"><button id="inspector-tab" class="active">Inspector</button><button id="logs-tab">Process log</button><button id="refresh" class="secondary">Refresh inspector</button></div><iframe id="inspector" title="Last Brownie run inspector"></iframe><pre id="logs" class="hidden">No process output.</pre></section></div></main>
 <script>
 const TOKEN='__TOKEN__',$=id=>document.getElementById(id);let lastInspectorCount=-1,lastEvents='',lastLogs='';
 function setText(id,value){if($(id).textContent!==value)$(id).textContent=value}
-function formState(){return{mode:$('mode').value,goal:$('goal').value,url:$('url').value,browser:$('browser').value,steerer:$('steerer').value,keep_open:$('keep-open').checked,max_steps:Number($('max-steps').value),max_pages:Number($('max-pages').value)}}
+function setList(id,values,empty){$(id).replaceChildren(...((values&&values.length)?values:[empty]).map(text=>{const li=document.createElement('li');li.textContent=text;return li}))}
+function formState(){return{mode:$('mode').value,goal:$('goal').value,url:$('url').value,task_path:$('task-path').value,inputs:$('basic-inputs').value.split('\n').map(value=>value.trim()).filter(Boolean),browser:$('browser').value,steerer:$('steerer').value,keep_open:$('keep-open').checked,max_steps:Number($('max-steps').value),max_pages:Number($('max-pages').value),max_sources:Number($('max-sources').value)}}
 function keyState(){return{typesafe_api_key:$('typesafe-key').value,gemini_api_key:$('gemini-key').value}}
 async function updateSettings(){const response=await fetch('/api/state',{headers:{'X-Brownie-Token':TOKEN}}),state=await response.json(),settings=state.settings||{};setText('key-status','Jev: '+(settings.jev_configured?'ready':'key needed')+' · LLM: '+(settings.llm_configured?'ready':'key needed')+' · Typing: '+(settings.text_configured?'ready':'key needed'))}
 async function post(path,body={}){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Brownie-Token':TOKEN},body:JSON.stringify(body)}),value=await response.json();if(!response.ok)throw new Error(value.error||'Request failed');return value}
-function adaptForm(){const mode=$('mode').value,browser=$('browser').value;$('url-wrap').classList.toggle('hidden',mode==='search');$('goal-wrap').classList.toggle('hidden',!['search','predict','step'].includes(mode));$('steerer-wrap').classList.toggle('hidden',!['search','predict','step'].includes(mode));$('budgets').classList.toggle('hidden',mode!=='search');if(mode==='search'&&browser==='attach')$('browser').value='managed';$('browser').querySelector('[value="attach"]').disabled=mode==='search';$('keep-open').disabled=$('browser').value==='attach'||mode==='predict';const help={managed:'Uses a dedicated profile and starts ordinary headed Chrome through localhost CDP.',playwright:"Starts Playwright-owned headed Chrome with Brownie's isolated profile.",attach:'Reuses a matching tab in Chrome already started with remote debugging. Brownie does not close it.'};$('browser-help').textContent=help[$('browser').value]}
-async function update(){try{const response=await fetch('/api/state',{headers:{'X-Brownie-Token':TOKEN}}),state=await response.json();setText('status',state.message);$('start').disabled=state.active;$('close').disabled=!state.can_close;$('stop').disabled=!state.can_stop;setText('reply',state.reply||(state.active?'Brownie is working...':'No result yet.'));const eventKey=JSON.stringify(state.events);if(eventKey!==lastEvents){$('events').replaceChildren(...(state.events.length?state.events:['Waiting for decisions.']).map(text=>{const li=document.createElement('li');li.textContent=text;return li}));lastEvents=eventKey}const logText=state.logs.join('\n')||'No process output.';if(logText!==lastLogs){$('logs').textContent=logText;lastLogs=logText}if(state.inspector_ready&&state.event_count!==lastInspectorCount&&['completed','failed','stopped','awaiting_close'].includes(state.status)){$('inspector').src='/inspector?t='+encodeURIComponent(TOKEN)+'&v='+state.event_count;lastInspectorCount=state.event_count}}catch(error){setText('error',error.message)}}
+function adaptForm(){const mode=$('mode').value,browser=$('browser').value,owned=['search','research','basic'];$('url-wrap').classList.toggle('hidden',owned.includes(mode));$('basic-wrap').classList.toggle('hidden',mode!=='basic');$('goal-wrap').classList.toggle('hidden',!['search','research','predict','step'].includes(mode));$('steerer-wrap').classList.toggle('hidden',!['search','research','predict','step'].includes(mode));$('budgets').classList.toggle('hidden',mode!=='search');$('research-budget').classList.toggle('hidden',mode!=='research');if(owned.includes(mode)&&browser==='attach')$('browser').value='managed';$('browser').querySelector('[value="attach"]').disabled=owned.includes(mode);$('keep-open').disabled=$('browser').value==='attach'||mode==='predict';const help={managed:'Uses a dedicated profile and starts ordinary headed Chrome through localhost CDP.',playwright:"Starts Playwright-owned headed Chrome with Brownie's isolated profile.",attach:'Reuses a matching tab in Chrome already started with remote debugging. Brownie does not close it.'};$('browser-help').textContent=help[$('browser').value]}
+async function update(){try{const response=await fetch('/api/state',{headers:{'X-Brownie-Token':TOKEN}}),state=await response.json();setText('status',state.message);$('start').disabled=state.active;$('close').disabled=!state.can_close;$('stop').disabled=!state.can_stop;$('dialogue').classList.toggle('hidden',!state.can_reply);$('send-reply').disabled=!state.can_reply;setText('reply',state.reply||(state.active?'Brownie is working...':'No result yet.'));const research=state.research_state;$('research-state').classList.toggle('hidden',!research);if(research){setText('research-decision',research.decision+(Number.isInteger(research.remaining)?' · '+research.remaining+' source slots left':''));setText('research-reason',research.reason);setList('research-needs',research.evidence_needs,'No open need reported.');setList('research-sources',research.sources.map(source=>'['+source.id+'] '+source.title+' · '+source.url),'No sources collected yet.')}const eventKey=JSON.stringify(state.events);if(eventKey!==lastEvents){$('events').replaceChildren(...(state.events.length?state.events:['Waiting for decisions.']).map(text=>{const li=document.createElement('li');li.textContent=text;return li}));lastEvents=eventKey}const logText=state.logs.join('\n')||'No process output.';if(logText!==lastLogs){$('logs').textContent=logText;lastLogs=logText}if(state.inspector_ready&&state.event_count!==lastInspectorCount&&['completed','failed','stopped','awaiting_close'].includes(state.status)){$('inspector').src='/inspector?t='+encodeURIComponent(TOKEN)+'&v='+state.event_count;lastInspectorCount=state.event_count}}catch(error){setText('error',error.message)}}
 $('save-settings').addEventListener('click',async()=>{$('error').textContent='';try{await post('/api/settings',keyState());$('typesafe-key').value='';$('gemini-key').value='';await updateSettings()}catch(error){$('error').textContent=error.message}});updateSettings();
 $('quit').addEventListener('click',async()=>{try{await post('/api/quit');document.body.innerHTML='<main><section class="panel"><h1>Brownie has stopped.</h1><p>You can close this tab.</p></section></main>'}catch(error){$('error').textContent=error.message}});
+$('send-reply').addEventListener('click',async()=>{$('error').textContent='';try{await post('/api/reply',{answer:$('reply-input').value});$('reply-input').value='';await update()}catch(error){$('error').textContent=error.message}});
 $('mode').addEventListener('change',adaptForm);$('browser').addEventListener('change',adaptForm);$('start').addEventListener('click',async()=>{$('error').textContent='';try{await post('/api/run',formState());await update()}catch(error){$('error').textContent=error.message}});$('close').addEventListener('click',async()=>{try{await post('/api/close')}catch(error){$('error').textContent=error.message}});$('stop').addEventListener('click',async()=>{try{await post('/api/stop')}catch(error){$('error').textContent=error.message}});$('refresh').addEventListener('click',()=>{$('inspector').src='/inspector?t='+encodeURIComponent(TOKEN)+'&v='+Date.now()});$('inspector-tab').addEventListener('click',()=>{$('inspector').classList.remove('hidden');$('logs').classList.add('hidden');$('inspector-tab').classList.add('active');$('logs-tab').classList.remove('active')});$('logs-tab').addEventListener('click',()=>{$('logs').classList.remove('hidden');$('inspector').classList.add('hidden');$('logs-tab').classList.add('active');$('inspector-tab').classList.remove('active')});adaptForm();update();setInterval(update,800);
 </script></body></html>'''
 
@@ -405,6 +546,8 @@ class UIRequestHandler(BaseHTTPRequestHandler):
                 self.server.manager.save_settings(payload)
             elif self.path == "/api/close":
                 self.server.manager.close_browser()
+            elif self.path == "/api/reply":
+                self.server.manager.reply(payload.get("answer"))
             elif self.path == "/api/quit":
                 self.server.manager.ensure_idle()
                 threading.Thread(target=self.server.shutdown, daemon=True).start()

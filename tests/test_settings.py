@@ -60,3 +60,12 @@ def test_search_explains_both_required_keys(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text("TYPESAFE_API_KEY=private\n", encoding="utf-8")
     with pytest.raises(ValueError, match="Gemini"):
         validate_provider_settings(tmp_path, {"mode": "search", "steerer": "jev"})
+
+
+def test_research_requires_planner_key_even_with_jev_steering(tmp_path, monkeypatch):
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("TYPESAFE_API_KEY=private\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Gemini"):
+        validate_provider_settings(tmp_path, {"mode": "research", "steerer": "jev"})

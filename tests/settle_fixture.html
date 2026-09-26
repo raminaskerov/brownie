@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Same-page settling fixture</title>
+  </head>
+  <body>
+    <main>
+      <button
+        type="button"
+        onclick="setTimeout(() => document.querySelector('#status').textContent = 'Loaded result', 200)"
+      >
+        Load result
+      </button>
+      <output id="status">Waiting</output>
+    </main>
+  </body>
+</html>

@@ -167,7 +167,10 @@ def run_search(
                 if search_field is None:
                     break
                 continue
-            execution["page_ready"] = browser.wait_for_page_ready(observation["url"])
+            execution["page_ready"] = browser.wait_for_page_ready(
+                observation["url"],
+                observation["fingerprint"],
+            )
             after = browser.observe()
             stop_reason = state.record_step(observation, execution, after)
             if stop_reason:
@@ -225,7 +228,10 @@ def run_search(
         stale_refreshes = 0
 
         if execution["executed"] and execution["operation"] in {"CLICK", "SUBMIT"}:
-            execution["page_ready"] = browser.wait_for_page_ready(observation["url"])
+            execution["page_ready"] = browser.wait_for_page_ready(
+                observation["url"],
+                observation["fingerprint"],
+            )
         after = browser.observe()
         stop_reason = state.record_step(observation, execution, after)
 

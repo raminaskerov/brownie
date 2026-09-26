@@ -16,6 +16,9 @@ from brownie_agent import (
 FIXTURE = Path(__file__).with_name("fixture.html")
 LOGIN_FIXTURE = Path(__file__).with_name("login_fixture.html")
 PAGINATION_FIXTURE = Path(__file__).with_name("pagination_fixture.html")
+POPUP_FIXTURE = Path(__file__).with_name("popup_fixture.html")
+PERCEPTION_FIXTURE = Path(__file__).with_name("perception_fixture.html")
+SETTLE_FIXTURE = Path(__file__).with_name("settle_fixture.html")
 
 
 def test_observe_returns_only_safe_visible_controls(tmp_path):
@@ -82,6 +85,69 @@ def test_observe_removes_windows_drive_from_file_fixture_destination(tmp_path):
         observation = browser.observe()
 
     assert observation["elements"][0]["destination"] == "/item/rtx-5070"
+
+
+def test_observe_and_execute_inside_visible_frame_and_open_shadow_root(tmp_path):
+    with BrowserSession(profile_dir=tmp_path / "profile") as browser:
+        browser.open(PERCEPTION_FIXTURE.as_uri())
+        observation = browser.observe()
+        shadow = next(element for element in observation["elements"] if element["name"] == "Inside shadow root")
+        frame = next(element for element in observation["elements"] if element["name"] == "Inside frame")
+
+        execute_action(browser, observation, operation="CLICK", target=shadow["index"])
+        after_shadow = browser.observe()
+        frame = next(element for element in after_shadow["elements"] if element["name"] == "Inside frame")
+        execute_action(browser, after_shadow, operation="CLICK", target=frame["index"])
+        after_frame = browser.observe()
+
+    assert observation["perception"] == {
+        "surface": "layered_viewport_dom",
+        "frame_count": 1,
+        "visible_frame_count": 1,
+        "inspected_frame_count": 1,
+        "inaccessible_frame_count": 0,
+        "open_shadow_root_count": 1,
+        "inspected_open_shadow_root_count": 1,
+        "accessibility_fallback_used": False,
+        "accessibility_limit_reached": False,
+        "accessibility_unavailable_count": 0,
+        "text_limit_reached": False,
+        "element_limit_reached": False,
+    }
+    assert "Inside frame" in observation["text"]
+    assert "Inside shadow root" in observation["text"]
+    assert shadow["context"] == "shadow: shadow-host"
+    assert frame["context"] == "frame: Embedded controls"
+    assert "Shadow clicked" in after_shadow["text"]
+    assert "Frame clicked" in after_frame["text"]
+
+
+def test_observe_detects_framed_password_without_exposing_it(tmp_path):
+    with BrowserSession(profile_dir=tmp_path / "profile") as browser:
+        browser.page.set_content(
+            '<iframe title="Sign in" '
+            'srcdoc="<label>Email <input type=email></label>'
+            '<label>Password <input type=password value=private-secret></label>"></iframe>'
+        )
+        observation = browser.observe()
+
+    assert classify_access(observation) == {"status": AUTH_REQUIRED, "reason": "visible_password_field"}
+    assert "private-secret" not in repr(observation)
+    assert {element["name"] for element in observation["elements"]} == {"Email"}
+    assert observation["perception"]["inspected_frame_count"] == 1
+    assert observation["perception"]["accessibility_fallback_used"] is False
+
+
+def test_sparse_page_uses_non_executable_accessibility_structure(tmp_path):
+    with BrowserSession(profile_dir=tmp_path / "profile") as browser:
+        browser.page.set_content('<main><div role="heading" aria-label="Dashboard overview"></div></main>')
+        observation = browser.observe()
+
+    assert observation["elements"] == []
+    assert "[Accessibility structure; non-executable]" in observation["text"]
+    assert 'heading "Dashboard overview"' in observation["text"]
+    assert observation["perception"]["accessibility_fallback_used"] is True
+    assert observation["perception"]["accessibility_limit_reached"] is False
 
 
 def test_scroll_down_once_reveals_below_fold_controls(tmp_path):
@@ -168,13 +234,43 @@ def test_click_destination_waits_for_asynchronously_rendered_content(tmp_path):
         observation = browser.observe()
 
         execute_action(browser, observation, operation="CLICK", target=5)
-        ready = browser.wait_for_page_ready(observation["url"])
+        ready = browser.wait_for_page_ready(observation["url"], observation["fingerprint"])
         after = browser.observe()
 
     assert ready is True
     assert after["title"] == "Delayed page"
     assert "Content rendered after navigation" in after["text"]
     assert after["elements"][0]["name"] == "Ready"
+
+
+def test_click_adopts_new_tab_and_waits_for_its_content(tmp_path):
+    with BrowserSession(profile_dir=tmp_path / "profile") as browser:
+        browser.open(POPUP_FIXTURE.as_uri())
+        observation = browser.observe()
+
+        execute_action(browser, observation, operation="CLICK", target=1)
+        ready = browser.wait_for_page_ready(observation["url"], observation["fingerprint"])
+        after = browser.observe()
+
+    assert ready is True
+    assert after["url"].endswith("/delayed_fixture.html")
+    assert after["title"] == "Delayed page"
+    assert "Content rendered after navigation" in after["text"]
+    assert after["elements"][0]["name"] == "Ready"
+
+
+def test_click_waits_for_asynchronous_same_page_change(tmp_path):
+    with BrowserSession(profile_dir=tmp_path / "profile") as browser:
+        browser.open(SETTLE_FIXTURE.as_uri())
+        observation = browser.observe()
+
+        execute_action(browser, observation, operation="CLICK", target=1)
+        ready = browser.wait_for_page_ready(observation["url"], observation["fingerprint"])
+        after = browser.observe()
+
+    assert ready is True
+    assert after["url"] == observation["url"]
+    assert "Loaded result" in after["text"]
 
 
 def test_execute_rejects_stale_observation_before_click(tmp_path):
@@ -189,6 +285,18 @@ def test_execute_rejects_stale_observation_before_click(tmp_path):
         status = browser.page.locator("#status").text_content()
 
     assert status == "idle"
+
+
+def test_execute_allows_incidental_text_change_when_action_structure_is_fresh(tmp_path):
+    with BrowserSession(profile_dir=tmp_path / "profile") as browser:
+        browser.open(FIXTURE.as_uri())
+        observation = browser.observe()
+        details = next(element for element in observation["elements"] if element["name"] == "Read details")
+        browser.page.locator("#status").evaluate("node => { node.textContent = 'transient status'; }")
+
+        result = execute_action(browser, observation, operation="CLICK", target=details["index"])
+
+    assert result["executed"] is True
 
 
 def test_execute_prediction_clicks_jev_selected_observed_target(tmp_path):

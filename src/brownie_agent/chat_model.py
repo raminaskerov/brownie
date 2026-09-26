@@ -23,6 +23,9 @@ else:
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 MAX_MODELS = 3
+TRANSIENT_STATUSES = frozenset({500, 502, 503, 504})
+MAX_TRANSIENT_RETRIES = 1
+TRANSIENT_RETRY_DELAY_SECONDS = 0.5
 
 
 def _lock_file(handle) -> None:
@@ -169,7 +172,7 @@ def rate_limit_policy(error: ModelHTTPError, now: float) -> tuple[str, float]:
 
 
 def model_settings(role: str) -> tuple[str, str, list[str]]:
-    if role not in {"TEXT", "STEERING"}:
+    if role not in {"RESEARCH", "TEXT", "STEERING"}:
         raise ValueError("Unknown model role")
     prefix = role + "_MODEL"
     key = os.environ.get(prefix + "_API_KEY", "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
@@ -186,8 +189,16 @@ def model_settings(role: str) -> tuple[str, str, list[str]]:
     return key, base + "/chat/completions", models
 
 
-def complete_chat(role: str, body: dict, *, post=post_chat, cooldowns=None, clock=time.time) -> tuple[dict, dict]:
-    """Try each candidate once; no retry of successful, malformed, or non-429 responses."""
+def complete_chat(
+    role: str,
+    body: dict,
+    *,
+    post=post_chat,
+    cooldowns=None,
+    clock=time.time,
+    sleeper=time.sleep,
+) -> tuple[dict, dict]:
+    """Use bounded pre-action transport recovery and model-scoped quota fallback."""
     key, url, models = model_settings(role)
     cooldowns = COOLDOWNS if cooldowns is None else cooldowns
     attempts = []
@@ -210,19 +221,38 @@ def complete_chat(role: str, body: dict, *, post=post_chat, cooldowns=None, cloc
         trace_event("model_request", {
             "provider": "llm", "role": role.lower(), "model": model, "body": request_body,
         })
-        try:
-            result = post(url, key, request_body)
-        except ModelHTTPError as error:
-            if error.status != 429:
-                raise
-            scope, delay = rate_limit_policy(error, clock())
-            cooldowns.access(identity(model if scope == "model" else "*"), clock(), clock() + delay)
-            if scope != "model":
-                raise RuntimeError(
-                    "HTTP 429 quota is shared or unclassified; model fallback stopped; no browser action executed."
-                ) from None
-            attempts.append({"model": model, "status": "rate_limited", "retry_after_seconds": math.ceil(delay)})
-            trace_event("model_attempt", {"provider": "llm", "role": role.lower(), **attempts[-1]})
+        transient_attempt = 0
+        model_rate_limited = False
+        while True:
+            try:
+                result = post(url, key, request_body)
+                break
+            except ModelHTTPError as error:
+                if error.status in TRANSIENT_STATUSES and transient_attempt < MAX_TRANSIENT_RETRIES:
+                    transient_attempt += 1
+                    attempt = {
+                        "model": model,
+                        "status": "service_unavailable",
+                        "http_status": error.status,
+                        "retry": transient_attempt,
+                    }
+                    attempts.append(attempt)
+                    trace_event("model_attempt", {"provider": "llm", "role": role.lower(), **attempt})
+                    sleeper(TRANSIENT_RETRY_DELAY_SECONDS)
+                    continue
+                if error.status != 429:
+                    raise
+                scope, delay = rate_limit_policy(error, clock())
+                cooldowns.access(identity(model if scope == "model" else "*"), clock(), clock() + delay)
+                if scope != "model":
+                    raise RuntimeError(
+                        "HTTP 429 quota is shared or unclassified; model fallback stopped; no browser action executed."
+                    ) from None
+                attempts.append({"model": model, "status": "rate_limited", "retry_after_seconds": math.ceil(delay)})
+                trace_event("model_attempt", {"provider": "llm", "role": role.lower(), **attempts[-1]})
+                model_rate_limited = True
+                break
+        if model_rate_limited:
             continue
         if not isinstance(result, dict):
             raise ValueError("Model returned an invalid response; no browser action executed.")

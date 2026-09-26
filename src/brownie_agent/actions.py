@@ -1,5 +1,8 @@
 """Validated one-operation execution against a fresh viewport observation."""
 
+import hashlib
+import json
+
 from .trace import trace_event
 
 OPERATIONS = ("SCROLL_DOWN", "SCROLL_UP", "CLICK", "TYPE_TEXT", "SUBMIT", "DONE", "BLOCKED")
@@ -18,6 +21,26 @@ def element_description(element: dict) -> str:
 
 class StaleObservation(ValueError):
     """The current page no longer matches the observation used for an action."""
+
+
+def _action_fingerprint(observation: dict) -> str:
+    """Hash facts that can change an action's target or consequence, excluding incidental page text."""
+    viewport = observation["viewport"]
+    content = {
+        "url": observation["url"],
+        "title": observation["title"],
+        "viewport": {
+            "width": viewport.get("width"),
+            "height": viewport.get("height"),
+            "scroll_y": viewport.get("scroll_y"),
+        },
+        "elements": observation["elements"],
+        "access": observation.get("access", {}),
+        "perception": observation.get("perception", {}),
+        "can_scroll_up": observation["can_scroll_up"],
+        "can_scroll_down": observation["can_scroll_down"],
+    }
+    return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
 
 
 def action_space(observation: dict) -> dict[str, list[int] | None]:
@@ -73,6 +96,10 @@ def execute_action(
     operation = operation.upper()
     element = _validate(operation, target, text, observation)
     current = browser.observe()
+    decision_action_fingerprint = _action_fingerprint(observation)
+    current_action_fingerprint = _action_fingerprint(current)
+    exact_freshness = current["fingerprint"] == observation["fingerprint"]
+    action_freshness = current_action_fingerprint == decision_action_fingerprint
     trace_event("execution_check", {
         "operation": operation,
         "target": target,
@@ -80,9 +107,12 @@ def execute_action(
         "text": text,
         "decision_fingerprint": observation["fingerprint"],
         "current_fingerprint": current["fingerprint"],
+        "decision_action_fingerprint": decision_action_fingerprint,
+        "current_action_fingerprint": current_action_fingerprint,
+        "freshness": "exact" if exact_freshness else "action_structure" if action_freshness else "stale",
         "available_action_space": action_space(current),
     })
-    if current["fingerprint"] != observation["fingerprint"]:
+    if not exact_freshness and (operation not in TARGETED_OPERATIONS or not action_freshness):
         raise StaleObservation("The page changed after observation; observe again before acting.")
 
     if operation == "SCROLL_DOWN":

@@ -8,10 +8,12 @@ from pathlib import Path
 
 from .access import READY, classify_access, local_blocked_prediction
 from .actions import OPERATIONS, execute_action, execute_prediction
+from .basic import load_basic_task, parse_basic_inputs, run_basic_task, validate_basic_inputs
 from .browser import BrowserSession
 from .config import load_env
 from .managed_chrome import ManagedChrome
 from .reader import read_page
+from .research import run_research
 from .search import run_search
 from .state import text_field_state
 from .steering import steer_action
@@ -63,15 +65,45 @@ def parser() -> argparse.ArgumentParser:
     mode.add_argument("--predict", action="store_true", help="Ask the steerer for one choice without executing it")
     mode.add_argument("--step", action="store_true", help="Ask the steerer and execute at most one action")
     mode.add_argument("--search", action="store_true", help="Search the web, open one source, read it, and stop")
+    mode.add_argument(
+        "--research",
+        action="store_true",
+        help="Plan a bounded multi-source research pass and return a cited answer",
+    )
+    mode.add_argument(
+        "--basic-task",
+        type=Path,
+        help="Run one validated deterministic Basic-mode JSON task",
+    )
     result.add_argument("--steerer", choices=("jev", "llm"), help="Action steering provider (default: jev)")
     mode.add_argument("--login", action="store_true", help="Open a headed browser for manual login preparation")
     result.add_argument("--target", type=int, help="Current observed element index for CLICK, TYPE_TEXT, or SUBMIT")
     result.add_argument("--text", help="Replacement field value for TYPE_TEXT")
-    result.add_argument("--goal", help="Natural-language goal for --predict, --step, or --search")
+    result.add_argument("--goal", help="Natural-language goal for --predict, --step, --search, or --research")
+    result.add_argument(
+        "--input",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Basic-task input; repeat for multiple values",
+    )
     result.add_argument("--env-file", type=Path, help="Environment file (default: Brownie's .env)")
     result.add_argument("--max-scrolls", type=int, default=10, help="Maximum scrolls for --read-page (default: 10)")
     result.add_argument("--max-steps", type=int, default=8, help="Maximum browser actions for --search (default: 8)")
     result.add_argument("--max-pages", type=int, default=3, help="Maximum distinct pages for --search (default: 3)")
+    result.add_argument(
+        "--max-sources",
+        type=int,
+        choices=range(1, 6),
+        default=3,
+        metavar="1..5",
+        help="Maximum distinct source URLs for --research (default: 3)",
+    )
+    result.add_argument(
+        "--research-dialogue",
+        action="store_true",
+        help="Let --research ask bounded clarification questions on standard input",
+    )
     result.add_argument("--json", action="store_true", help="Print the complete observation as JSON")
     result.add_argument(
         "--trace",
@@ -91,6 +123,28 @@ def print_observation(observation: dict, *, heading: str = "Current snapshot") -
         print(f"[{element['index']}] {element['role']:<11} {element['name']}{value}{context}{destination}")
     if observation["omitted_elements"]:
         print(f"\n... {observation['omitted_elements']} additional visible elements omitted")
+    perception = observation.get("perception", {})
+    gaps = []
+    visible_frames = perception.get("visible_frame_count", perception.get("frame_count", 0))
+    frame_gap = max(0, visible_frames - perception.get("inspected_frame_count", 0))
+    if frame_gap:
+        gaps.append(f"{frame_gap} visible frame(s) not inspected")
+    shadow_gap = max(
+        0,
+        perception.get("open_shadow_root_count", 0) - perception.get("inspected_open_shadow_root_count", 0),
+    )
+    if shadow_gap:
+        gaps.append(f"{shadow_gap} open shadow root(s) not inspected")
+    if perception.get("accessibility_unavailable_count"):
+        gaps.append(f"{perception['accessibility_unavailable_count']} accessibility surface(s) unavailable")
+    if perception.get("accessibility_limit_reached"):
+        gaps.append("accessibility-structure limit reached")
+    if perception.get("text_limit_reached"):
+        gaps.append("visible-text limit reached")
+    if perception.get("element_limit_reached"):
+        gaps.append("visible-element limit reached")
+    if gaps:
+        print(f"\nPerception gaps: {', '.join(gaps)}")
     directions = []
     if observation["can_scroll_up"]:
         directions.append("up")
@@ -192,39 +246,93 @@ def print_search(result: dict) -> None:
     print(source["material"])
 
 
+def print_basic_task(result: dict) -> None:
+    print(f"Basic task: {result['task']}")
+    print(f"Status: {result['status']} ({result['stop_reason']})")
+    page = result["last_page"]
+    print(f"Last page: {page['title']}\n{page['url']}")
+    output = result.get("output")
+    if output and output.get("material"):
+        print(f"\nRead with {output['scrolls']} scroll(s); stopped: {output['stop_reason']}\n")
+        print(output["material"])
+
+
+def print_research(result: dict) -> None:
+    print(f"Research status: {result['status']} ({result['stop_reason']})")
+    if result.get("question"):
+        print(f"Question: {result['question']}")
+    if result.get("answer"):
+        print(f"\n{result['answer']}")
+    if result.get("cited_sources"):
+        print("\nSources:")
+        for source in result["cited_sources"]:
+            print(f"[{source['id']}] {source['title']}\n{source['url']}")
+
+
+def read_research_answer(question: str) -> str:
+    """Ask one research clarification without treating the reply as a browser command."""
+    print(f"Brownie asks: {question}", file=sys.stderr, flush=True)
+    try:
+        return input()
+    except EOFError:
+        raise RuntimeError("Research dialogue requires an interactive input channel") from None
+
+
 def main() -> None:
     argument_parser = parser()
     args = argument_parser.parse_args()
-    if (args.predict or args.step or args.search) and not args.goal:
-        argument_parser.error("--predict, --step, and --search require --goal")
-    if args.goal and not (args.predict or args.step or args.search):
-        argument_parser.error("--goal is currently used only with --predict, --step, or --search")
-    if args.search and args.url:
-        argument_parser.error("--search chooses its own search-engine URL; do not supply a URL")
-    if not args.search and not args.url:
-        argument_parser.error("a URL is required unless --search is used")
-    if args.search and args.attach:
-        argument_parser.error("--search cannot use a user-owned --attach session; use --managed-cdp instead")
+    basic_task = None
+    basic_inputs = {}
+    if args.basic_task:
+        try:
+            basic_task = load_basic_task(args.basic_task)
+            basic_inputs = parse_basic_inputs(args.input)
+            basic_inputs = validate_basic_inputs(basic_task, basic_inputs)
+        except ValueError as exc:
+            argument_parser.error(str(exc))
+    if (args.predict or args.step or args.search or args.research) and not args.goal:
+        argument_parser.error("--predict, --step, --search, and --research require --goal")
+    if args.goal and not (args.predict or args.step or args.search or args.research):
+        argument_parser.error("--goal is currently used only with --predict, --step, --search, or --research")
+    if (args.search or args.research or args.basic_task) and args.url:
+        argument_parser.error("--search, --research, and --basic-task choose their own start URL; do not supply a URL")
+    if not (args.search or args.research or args.basic_task) and not args.url:
+        argument_parser.error("a URL is required unless --search, --research, or --basic-task is used")
+    if args.input and not args.basic_task:
+        argument_parser.error("--input requires --basic-task")
+    if args.research_dialogue and not args.research:
+        argument_parser.error("--research-dialogue requires --research")
+    if (args.search or args.research or args.basic_task) and args.attach:
+        argument_parser.error(
+            "--search, --research, and --basic-task cannot use a user-owned --attach session; use --managed-cdp instead"
+        )
     if args.use_open_tab and not args.attach:
         argument_parser.error("--use-open-tab requires --attach")
     if args.chrome_executable and not args.managed_cdp:
         argument_parser.error("--chrome-executable requires --managed-cdp")
-    if args.steerer and not (args.predict or args.step or args.search):
-        argument_parser.error("--steerer requires --predict, --step, or --search")
-    if args.predict or args.step or args.search:
+    if args.steerer and not (args.predict or args.step or args.search or args.research):
+        argument_parser.error("--steerer requires --predict, --step, --search, or --research")
+    if args.predict or args.step or args.search or args.research:
         load_env(args.env_file)
     profile_dir = args.profile or Path(".browser-profile-cdp" if args.managed_cdp else ".browser-profile")
     cdp_url = args.cdp_endpoint if args.attach or args.managed_cdp else None
     with ExitStack() as stack:
         recorder = stack.enter_context(TraceRecorder(args.trace)) if args.trace else None
         trace_event("run", {
-            "mode": next((name for name in ("search", "step", "predict", "read_page", "action", "login")
+            "mode": next((name for name in (
+                "basic_task", "research", "search", "step", "predict", "read_page", "action", "login",
+            )
                           if getattr(args, name, False)), "observe"),
             "goal": args.goal,
-            "url": args.url,
+            "url": basic_task.start_url if basic_task else args.url,
             "provider": args.steerer or "jev",
             "managed_cdp": args.managed_cdp,
-            "budgets": {"max_steps": args.max_steps, "max_pages": args.max_pages, "max_scrolls": args.max_scrolls},
+            "budgets": {
+                "max_steps": args.max_steps,
+                "max_pages": args.max_pages,
+                "max_scrolls": args.max_scrolls,
+                "max_sources": args.max_sources,
+            },
         })
         if args.managed_cdp:
             stack.enter_context(
@@ -237,12 +345,26 @@ def main() -> None:
         browser = stack.enter_context(
             BrowserSession(
                 profile_dir=profile_dir,
-                headed=args.headed or args.login or args.search or args.keep_open,
+                headed=args.headed or args.login or args.search or args.research or args.keep_open,
                 channel=args.channel,
                 cdp_url=cdp_url,
             )
         )
-        if args.search:
+        if args.basic_task:
+            result = run_basic_task(browser, basic_task, basic_inputs)
+        elif args.research:
+            research_options = {
+                "provider": args.steerer,
+                "max_sources": args.max_sources,
+            }
+            if args.research_dialogue:
+                research_options["ask_user"] = read_research_answer
+            result = run_research(
+                browser,
+                args.goal,
+                **research_options,
+            )
+        elif args.search:
             result = run_search(
                 browser,
                 args.goal,
@@ -253,7 +375,7 @@ def main() -> None:
             )
         else:
             browser.open(args.url, use_open_tab=args.use_open_tab)
-        if args.search:
+        if args.search or args.research or args.basic_task:
             pass
         elif args.login:
             print("Complete login or the human challenge in the browser window.")
@@ -298,7 +420,10 @@ def main() -> None:
                     else:
                         execution = execute_prediction(browser, result, prediction)
                     if execution["executed"] and execution["operation"] in {"CLICK", "SUBMIT"}:
-                        execution["page_ready"] = browser.wait_for_page_ready(result["url"])
+                        execution["page_ready"] = browser.wait_for_page_ready(
+                            result["url"],
+                            result["fingerprint"],
+                        )
                     result = {
                         "prediction": prediction,
                         "execution": execution,
@@ -316,7 +441,10 @@ def main() -> None:
                     text=args.text,
                 )
                 if execution["executed"] and args.action in {"CLICK", "SUBMIT"}:
-                    execution["page_ready"] = browser.wait_for_page_ready(result["url"])
+                    execution["page_ready"] = browser.wait_for_page_ready(
+                        result["url"],
+                        result["fingerprint"],
+                    )
                 result = {
                     "execution": execution,
                     "decision_fingerprint": result["fingerprint"],
@@ -334,8 +462,12 @@ def main() -> None:
                 raise RuntimeError("--keep-open requires an interactive terminal") from None
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
+    elif args.basic_task:
+        print_basic_task(result)
     elif args.search:
         print_search(result)
+    elif args.research:
+        print_research(result)
     elif args.read_page:
         print_page_read(result)
     elif args.action:

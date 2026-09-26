@@ -77,7 +77,7 @@ class SearchBrowser:
         assert node_id == 20
         self.state = "source"
 
-    def wait_for_page_ready(self, _previous_url):
+    def wait_for_page_ready(self, _previous_url, _previous_fingerprint=None):
         return True
 
     def scroll_down(self):

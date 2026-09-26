@@ -93,7 +93,7 @@ def test_shared_or_unknown_429_stops_without_trying_another_model(monkeypatch, e
     assert calls == ["primary"]
 
 
-@pytest.mark.parametrize("status", [400, 401, 403, 404, 500, 503])
+@pytest.mark.parametrize("status", [400, 401, 403, 404])
 def test_non_quota_errors_never_fall_back(monkeypatch, status):
     configure(monkeypatch)
     calls = []
@@ -105,6 +105,42 @@ def test_non_quota_errors_never_fall_back(monkeypatch, status):
     with pytest.raises(ModelHTTPError):
         complete_chat("STEERING", {}, post=post)
     assert calls == ["primary"]
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_transient_service_error_retries_same_model_once_without_fallback(monkeypatch, status):
+    configure(monkeypatch)
+    calls = []
+    sleeps = []
+
+    def post(_url, _key, body):
+        calls.append(body["model"])
+        raise ModelHTTPError(status)
+
+    with pytest.raises(ModelHTTPError):
+        complete_chat("STEERING", {}, post=post, sleeper=sleeps.append)
+    assert calls == ["primary", "primary"]
+    assert sleeps == [0.5]
+
+
+def test_transient_service_retry_can_answer_before_any_browser_action(monkeypatch):
+    configure(monkeypatch)
+    calls = []
+
+    def post(_url, _key, body):
+        calls.append(body["model"])
+        if len(calls) == 1:
+            raise ModelHTTPError(503)
+        return {"choices": []}
+
+    _, metadata = complete_chat("STEERING", {}, post=post, sleeper=lambda _delay: None)
+
+    assert calls == ["primary", "primary"]
+    assert metadata["model"] == "primary"
+    assert metadata["model_attempts"] == [
+        {"model": "primary", "status": "service_unavailable", "http_status": 503, "retry": 1},
+        {"model": "primary", "status": "answered"},
+    ]
 
 
 def test_exhausted_candidates_stop_after_one_attempt_each(monkeypatch):

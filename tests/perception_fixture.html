@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Perception boundary fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Top document</h1>
+      <iframe title="Embedded controls" srcdoc="<button onclick=&quot;this.textContent='Frame clicked'&quot;>Inside frame</button>"></iframe>
+      <section id="shadow-host"></section>
+    </main>
+    <script>
+      const root = document.querySelector('#shadow-host').attachShadow({mode: 'open'});
+      root.innerHTML = '<button onclick="this.textContent=\'Shadow clicked\'">Inside shadow root</button>';
+    </script>
+  </body>
+</html>

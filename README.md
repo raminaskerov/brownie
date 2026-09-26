@@ -3,7 +3,15 @@
 Brownie is a small, occasional browser runner. It is being built in narrow
 steps so the browser boundary stays understandable.
 
-## Current milestone: bounded actions and one-source search
+The product direction is one shared safe browser core with two modes: a
+deterministic **basic mode** for repeatable tasks and a bounded,
+conversational **research mode** with layered perception and planning. They
+will not be separate forks. See [the product architecture](docs/product-architecture.md)
+for the mode contracts, reliability program, external-tool assessment, and
+staged roadmap. The [reliability matrix](docs/reliability-matrix.md) separates
+repeatable fixture coverage from dated live smoke evidence.
+
+## Current milestone: Basic workflows and bounded multi-source research
 
 Brownie can:
 
@@ -19,7 +27,15 @@ Brownie can:
 - alternatively use a Gemini-compatible LLM to select the same bounded action; and
 - prepare a persistent logged-in browser profile through a manual headed session; and
 - take a goal without a URL, search DuckDuckGo, open one selected external source,
-  read its page material, and stop.
+  read its page material, and stop;
+- adopt a newly opened tab after a validated click or submission;
+- wait for an observable navigation or same-page outcome after those operations; and
+- inspect visible frame and open-shadow-root DOM surfaces while reporting any
+  inaccessible frame, text-limit, and element-limit perception gaps;
+- add a bounded, non-executable accessibility structure when an ordinary DOM
+  observation is sparse, while suppressing that fallback on password pages; and
+- plan a bounded research pass, read up to five distinct sources through the
+  existing safe search runner, and return a source-linked answer or question.
 
 It does not use Browser Harness or connect to the user's normal Chrome
 session. Brownie owns its page observer and can evolve independently.
@@ -57,6 +73,49 @@ contains up to five exact source lines ranked locally by overlap with the goal.
 It does not send source material to another model or claim semantic relevance or
 sufficiency.
 
+## Bounded research mode
+
+Research mode adds a planner above the one-source search policy. The planner can
+choose the next query, answer from collected excerpts, ask the user a material
+clarifying question, or stop. It never receives browser handles or proposes
+selectors, JavaScript, coordinates, or executable actions.
+
+```bash
+./.venv/bin/brownie --managed-cdp --research --steerer llm \
+  --max-sources 3 --goal "Compare the official eligibility rules and application deadlines"
+```
+
+The code-owned controller limits research to one through five distinct sources,
+rejects an answer before the minimum evidence count, rejects duplicate queries
+and sources, validates citation identifiers, and caps planner cycles. Each
+source is still obtained through Brownie's existing bounded `goal -> search ->
+one result -> one source -> stop` runner.
+
+This is not yet a general autonomous researcher. It has no long-lived memory,
+follow-citation tool, or contradiction engine. In the control room, the planner
+can ask up to three clarification questions and continue the same run with the
+same browser and collected sources. User answers clarify the research state;
+they never become browser commands or new execution authority. See
+[Research mode](docs/research-mode.md) for the exact boundary.
+
+## Basic mode for repeatable tasks
+
+Basic mode runs a validated local JSON workflow without model calls. It matches
+semantic targets against every fresh observation, restricts navigation to the
+contract's allowed origins, and stops instead of improvising when a target is
+missing, ambiguous, unsupported, or outside Brownie's current perception.
+
+    uv run brownie --basic-task tasks/report.json \
+      --input query="solar report" \
+      --headed
+
+The first contract version supports field text, search submission, link
+navigation, simple control toggles, scrolling, assertions, bounded page reading,
+and explicit completion. Generic buttons and non-search form submissions remain
+blocked because their consequences cannot yet be classified reliably. See
+[Basic-mode task contracts](docs/basic-tasks.md) for the schema, safety boundary,
+and structured stop reasons.
+
 ### Inspect what Brownie sent and received
 
 Add an opt-in trace to any run:
@@ -92,9 +151,11 @@ also available.
 It opens `http://127.0.0.1:8766/` and provides one place to choose the current
 task, Chrome start mode, Jev or LLM steering, limits, and whether Brownie's owned
 Chrome stays open after the task. It shows a compact decision timeline, Brownie's
-final grounded result, process errors, and the live `artifacts/last-run.html`
-inspector. Use **Close Brownie browser** when a finished managed or Playwright
-window should close.
+current research decision, open evidence needs, collected source links, final
+grounded result, process errors, and the live `artifacts/last-run.html`
+inspector. It also accepts bounded clarification answers during a research run.
+Use **Close Brownie browser** when a finished managed or Playwright window should
+close.
 
 The control room accepts one run at a time, binds only to localhost, and does not
 offer a free-form command field. It invokes the same CLI, observer, freshness
@@ -212,9 +273,12 @@ The supported contract is `SCROLL_DOWN`, `SCROLL_UP`, `CLICK`, `TYPE_TEXT`,
 `SUBMIT`, `DONE`, and `BLOCKED`. `CLICK`, `TYPE_TEXT`, and `SUBMIT` accept only an index from the
 fresh observation. Selectors, coordinates, JavaScript, and multiple actions
 are not accepted. Brownie re-observes immediately before execution and rejects
-the operation if the page changed. After a click, it waits up to three seconds
-for a navigation destination to expose text, controls, or scrollable content.
-It never repeats the click.
+the operation if action-relevant structure changed. Incidental status text or
+document-height churn may pass only when the URL, title, viewport position,
+complete semantic target table, access signals, and perception state remain
+identical. After a click, it waits up to three seconds for a navigation
+destination to expose text, controls, or scrollable content. It never repeats
+the click.
 
 ## Jev prediction only
 

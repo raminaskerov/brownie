@@ -92,7 +92,7 @@ def save_provider_keys(runtime_dir: Path, payload: dict) -> dict[str, bool]:
 
 def validate_provider_settings(runtime_dir: Path, config: dict) -> None:
     mode = str(config.get("mode", "search"))
-    if mode not in {"search", "predict", "step"}:
+    if mode not in {"research", "search", "predict", "step"}:
         return
     status = provider_status(runtime_dir)
     steerer = str(config.get("steerer", "jev"))
@@ -100,5 +100,7 @@ def validate_provider_settings(runtime_dir: Path, config: dict) -> None:
         raise ValueError("Add a TypeSafe API key under Model keys before using Jev")
     if steerer == "llm" and not status["llm_configured"]:
         raise ValueError("Add a Gemini API key under Model keys before using LLM steering")
+    if mode == "research" and not status["llm_configured"]:
+        raise ValueError("Add a Gemini API key under Model keys before researching")
     if mode == "search" and not status["text_configured"]:
         raise ValueError("Add a Gemini API key under Model keys before searching")

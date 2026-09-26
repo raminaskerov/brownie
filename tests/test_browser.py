@@ -1,7 +1,23 @@
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from brownie_agent.browser import BrowserSession
+from brownie_agent.browser import BrowserSession, _sanitize_accessibility_snapshot
+
+
+def test_accessibility_snapshot_sanitizer_drops_values_and_urls():
+    sanitized = _sanitize_accessibility_snapshot(
+        '- heading "Account" [level=1]\n'
+        '- textbox "Email": private@example.test\n'
+        '- searchbox: secret query\n'
+        '- link "Profile":\n'
+        '  - /url: https://example.test/profile?token=private\n'
+    )
+
+    assert 'heading "Account"' in sanitized
+    assert 'textbox "Email"' in sanitized
+    assert "private@example.test" not in sanitized
+    assert "secret query" not in sanitized
+    assert "token=private" not in sanitized
 
 
 def test_browser_launch_requires_chromium_sandbox(monkeypatch, tmp_path):
