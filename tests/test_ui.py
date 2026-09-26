@@ -237,3 +237,81 @@ def test_ui_projects_only_bounded_research_plan_facts():
         "remaining": 2,
     }
     assert "Private" not in repr(state)
+
+
+def test_local_api_token_is_private_and_snapshot_exposes_structured_result(tmp_path):
+    import os
+
+    from brownie_agent.ui import _write_api_token
+
+    token_path = tmp_path / "artifacts" / "api-token"
+    _write_api_token(token_path, "example-token")
+    assert token_path.read_text(encoding="utf-8") == "example-token\n"
+    if os.name != "nt":
+        assert token_path.stat().st_mode & 0o077 == 0
+
+    manager = RunManager(tmp_path)
+    manager.trace_path.write_text(json.dumps({
+        "event": "run_result",
+        "data": {"result": {"mode": "basic", "status": "completed", "captures": {
+            "reference": {"value": "ABC", "url": "https://example.test/"},
+        }}},
+    }) + "\n", encoding="utf-8")
+    assert manager.snapshot()["result"]["captures"]["reference"]["value"] == "ABC"
+
+
+def test_control_room_can_launch_firefox_basic_task(tmp_path):
+    command = build_command({
+        "mode": "basic", "browser": "firefox", "task_path": "tasks/report.json", "keep_open": False,
+    }, trace_path=tmp_path / "last-run.jsonl")
+    assert command[command.index("--browser") + 1] == "firefox"
+    assert "--headed" in command
+    assert "--managed-cdp" not in command
+    assert 'option value="firefox"' in HTML
+    assert 'option value="webkit"' in HTML
+
+
+def test_basic_reply_includes_named_captures():
+    reply = _result_reply({
+        "mode": "basic", "task": "Daily report", "status": "completed", "stop_reason": "task_complete",
+        "last_page": {"title": "Portal", "url": "https://example.test/"}, "output": None,
+        "captures": {"reference": {"value": "ABC", "url": "https://example.test/"}},
+    })
+    assert "reference: ABC (https://example.test/)" in reply
+
+
+def test_finished_run_archives_full_trace_and_compact_proposal_index(tmp_path):
+    import os
+
+    manager = RunManager(tmp_path)
+    manager._run_id = "20260926T120000Z-test0001"
+    manager._status = "completed"
+    manager.trace_path.parent.mkdir(parents=True)
+    events = [
+        {"event": "run", "data": {"mode": "research", "goal": "Compare policies"}},
+        {"event": "research_plan", "data": {"plan": {
+            "decision": "SEARCH_WEB", "reason": "Need official policy", "search_query": "policy",
+        }}},
+        {"event": "research_question", "data": {"turn": 1, "question": "Which year?"}},
+        {"event": "research_answer", "data": {"turn": 1, "answer": "2025"}},
+        {"event": "run_result", "data": {"result": {
+            "status": "answered", "stop_reason": "answer", "last_page": {"url": "https://example.test/"},
+            "sources": [{"id": "S1", "title": "Policy", "url": "https://example.test/policy", "excerpts": ["text"]}],
+        }}},
+    ]
+    original = "".join(json.dumps(event) + "\n" for event in events)
+    manager.trace_path.write_text(original, encoding="utf-8")
+
+    assert manager._archive_run() == manager._run_id
+    archive_dir = tmp_path / "artifacts" / "runs"
+    assert (archive_dir / f"{manager._run_id}.jsonl").read_text(encoding="utf-8") == original
+    summary = json.loads((archive_dir / f"{manager._run_id}.json").read_text(encoding="utf-8"))
+    assert summary["mode"] == "research"
+    assert summary["goal"] == "Compare policies"
+    assert summary["planner_proposals"] == [{"decision": "SEARCH_WEB", "reason": "Need official policy"}]
+    assert summary["user_clarifications"] == [{"turn": 1, "question": "Which year?", "answer": "2025"}]
+    assert summary["source_links"] == [{"id": "S1", "title": "Policy", "url": "https://example.test/policy"}]
+    assert "search_query" not in repr(summary)
+    assert "excerpts" not in repr(summary)
+    if os.name != "nt":
+        assert (archive_dir / f"{manager._run_id}.jsonl").stat().st_mode & 0o077 == 0

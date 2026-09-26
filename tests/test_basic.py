@@ -283,3 +283,101 @@ def test_basic_task_runs_through_real_browser_boundary(tmp_path):
     assert result["status"] == "completed"
     assert [step["operation"] for step in result["steps"]] == ["TYPE_TEXT", "SUBMIT", "ASSERT", "DONE"]
     assert result["steps"][0]["observation_changed"] is True
+
+
+def test_basic_task_captures_unique_visible_line_and_pastes_through_executor():
+    class CopyBrowser(BasicBrowser):
+        def observe(self):
+            result = super().observe()
+            result["text"] = "Reference: solar report"
+            return result
+
+    task = parse_basic_task(contract(
+        {
+            "operation": "CAPTURE_TEXT",
+            "line_contains": "Reference:",
+            "extract_after": "Reference:",
+            "save_as": "reference",
+        },
+        {
+            "operation": "TYPE_TEXT",
+            "target": {"role": "searchbox", "name": "Search"},
+            "capture": "reference",
+        },
+        {"operation": "DONE"},
+    ))
+
+    result = run_basic_task(CopyBrowser(), task)
+
+    assert result["status"] == "completed"
+    assert result["captures"] == {
+        "reference": {"value": "solar report", "url": "https://example.test/"},
+    }
+    assert [step["operation"] for step in result["steps"]] == ["CAPTURE_TEXT", "TYPE_TEXT", "DONE"]
+    assert "solar report" not in repr(result["steps"])
+
+
+def test_basic_capture_stops_on_ambiguous_or_incomplete_visible_text():
+    class ReadOnlyBrowser(BasicBrowser):
+        def __init__(self, text, perception=None):
+            super().__init__()
+            self.text = text
+            self.perception = perception
+
+        def observe(self):
+            return observation(
+                "https://example.test/", "copy", text=self.text, perception=self.perception,
+            )
+
+    task = parse_basic_task(contract({
+        "operation": "CAPTURE_TEXT", "line_contains": "Reference:",
+        "extract_after": "Reference:", "save_as": "reference",
+    }, {"operation": "DONE"}))
+
+    ambiguous = run_basic_task(ReadOnlyBrowser("Reference: A\nReference: B"), task)
+    assert ambiguous["stop_reason"] == "capture_ambiguous"
+    assert ambiguous["captures"] == {}
+    incomplete = run_basic_task(ReadOnlyBrowser(
+        "Reference: A", perception={"text_limit_reached": True},
+    ), task)
+    assert incomplete["stop_reason"] == "perception_incomplete"
+
+
+def test_basic_capture_reference_must_be_prior_and_unique():
+    target = {"role": "searchbox", "name": "Search"}
+    with pytest.raises(ValueError, match="earlier CAPTURE_TEXT"):
+        parse_basic_task(contract({"operation": "TYPE_TEXT", "target": target, "capture": "reference"}))
+    with pytest.raises(ValueError, match="unique"):
+        parse_basic_task(contract(
+            {"operation": "CAPTURE_TEXT", "line_contains": "Reference:", "save_as": "reference"},
+            {"operation": "CAPTURE_TEXT", "line_contains": "Reference:", "save_as": "reference"},
+        ))
+
+
+def test_basic_capture_and_paste_run_through_real_browser_boundary(tmp_path):
+    fixture = Path(__file__).with_name("capture_fixture.html")
+    task = parse_basic_task({
+        "version": 1,
+        "name": "Copy report reference",
+        "start_url": fixture.as_uri(),
+        "allowed_origins": ["file://"],
+        "inputs": [],
+        "steps": [
+            {
+                "operation": "CAPTURE_TEXT", "line_contains": "Reference: solar report",
+                "extract_after": "Reference:", "save_as": "reference",
+            },
+            {
+                "operation": "TYPE_TEXT", "target": {"role": "textbox", "name": "Reference"},
+                "capture": "reference",
+            },
+            {"operation": "DONE"},
+        ],
+    })
+
+    with BrowserSession(profile_dir=tmp_path / "profile") as browser:
+        result = run_basic_task(browser, task)
+        assert browser.observe()["elements"][0]["value"] == "solar report"
+
+    assert result["status"] == "completed"
+    assert result["captures"]["reference"]["value"] == "solar report"

@@ -7,8 +7,9 @@ The product direction is one shared safe browser core with two modes: a
 deterministic **basic mode** for repeatable tasks and a bounded,
 conversational **research mode** with layered perception and planning. They
 will not be separate forks. See [the product architecture](docs/product-architecture.md)
-for the mode contracts, reliability program, external-tool assessment, and
-staged roadmap. The [reliability matrix](docs/reliability-matrix.md) separates
+for the mode contracts, reliability program, and staged roadmap. The
+[tool comparison](docs/tool-comparison.md) records current alternatives and
+near-term adoption decisions. The [reliability matrix](docs/reliability-matrix.md) separates
 repeatable fixture coverage from dated live smoke evidence.
 
 ## Current milestone: Basic workflows and bounded multi-source research
@@ -116,6 +117,28 @@ blocked because their consequences cannot yet be classified reliably. See
 [Basic-mode task contracts](docs/basic-tasks.md) for the schema, safety boundary,
 and structured stop reasons.
 
+### Local API and other Playwright browsers
+
+The control room also provides a tokened localhost API for starting typed runs,
+polling the structured result, replying to a planner question, stopping, and
+closing Brownie's owned browser. See [Local API](docs/local-api.md). Basic tasks
+can capture a unique visible line, paste it into a later observed field, and
+report named values with their source URLs; see [Basic-mode task contracts](docs/basic-tasks.md).
+
+Chrome remains the default. For a Playwright-owned Firefox or WebKit session,
+install that browser build and select it in the control room or pass `--browser`:
+
+```bash
+uv run python -m playwright install firefox webkit
+uv run brownie --browser firefox --headed https://example.com
+uv run brownie --browser webkit --read-page https://example.com
+```
+
+Each engine uses its own isolated profile. `--attach`, `--managed-cdp`, and
+`--channel` apply only to Chromium. Firefox and WebKit launch paths have offline
+contract tests but have not been live-tested in this checkout because their
+Playwright browser builds are not installed here.
+
 ### Inspect what Brownie sent and received
 
 Add an opt-in trace to any run:
@@ -156,6 +179,10 @@ grounded result, process errors, and the live `artifacts/last-run.html`
 inspector. It also accepts bounded clarification answers during a research run.
 Use **Close Brownie browser** when a finished managed or Playwright window should
 close.
+
+The control room keeps exact private run traces and compact decision indexes
+under `artifacts/runs/` after each process finishes. Planner proposals are
+recorded as proposals, not promoted to trusted facts for later runs.
 
 The control room accepts one run at a time, binds only to localhost, and does not
 offer a free-form command field. It invokes the same CLI, observer, freshness
@@ -581,10 +608,11 @@ uv run python -m pytest
 
 ## Current boundary
 
-Each observation sees only the current top-level viewport. Bounded page reading
-can join observations from successive viewports, stopping at the page bottom,
-a repeated view, a failed scroll, or `--max-scrolls`. It does not inspect
-iframes, shadow roots, canvas content, or browser chrome. There is no general
-action loop or scheduler yet. Either steerer can choose one operation with
-`--step`; `TYPE_TEXT` additionally invokes the field-text helper. Login preparation is always
-interactive.
+Each observation is bounded to visible DOM text and controls in the current
+viewport, including inspected frames and open shadow roots. Sparse pages may add
+non-executable accessibility structure. Closed shadow roots, canvas-only content,
+and browser chrome remain outside this view. Bounded page reading joins
+successive viewports; search and research use code-owned action and source
+budgets. Either steerer can choose one operation with `--step`; `TYPE_TEXT`
+additionally invokes the field-text helper. Login preparation remains
+interactive. There is no scheduler or general cross-site workflow planner.

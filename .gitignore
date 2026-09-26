@@ -1,5 +1,7 @@
 .browser-profile/
 .browser-profile-cdp/
+.browser-profile-firefox/
+.browser-profile-webkit/
 .venv/
 .env
 .pytest_cache/

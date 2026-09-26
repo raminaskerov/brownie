@@ -5,10 +5,13 @@ import argparse
 import json
 import os
 import secrets
+import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import webbrowser
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,7 +28,7 @@ MAX_BODY_BYTES = 64 * 1024
 MAX_LOG_LINES = 160
 MAX_REPLY_CHARS = 24_000
 MODES = {"basic", "research", "search", "predict", "step", "read", "observe"}
-BROWSERS = {"managed", "playwright", "attach"}
+BROWSERS = {"managed", "playwright", "firefox", "webkit", "attach"}
 STEERERS = {"jev", "llm"}
 
 
@@ -79,8 +82,10 @@ def build_command(config: dict, *, trace_path: Path) -> list[str]:
     command = worker_command()
     if browser == "managed":
         command.append("--managed-cdp")
-    elif browser == "playwright":
+    elif browser in {"playwright", "firefox", "webkit"}:
         command.append("--headed")
+        if browser != "playwright":
+            command.extend(("--browser", browser))
     else:
         command.extend(("--attach", "--use-open-tab"))
 
@@ -209,17 +214,22 @@ def _result_reply(result: Any) -> str:
     if not isinstance(result, dict):
         return "Brownie finished, but its result was not structured as expected."
     if result.get("mode") == "basic":
+        captures = result.get("captures") or {}
+        capture_lines = "\n".join(
+            f"{name}: {record['value']} ({record['url']})" for name, record in captures.items()
+        )
+        capture_suffix = f"\n\nCaptured values:\n{capture_lines}" if capture_lines else ""
         output = result.get("output")
         if result.get("status") == "completed" and isinstance(output, dict) and output.get("material"):
             return _clip(
                 f"Basic task completed: {result.get('task', 'Untitled')}\n"
-                f"{output.get('url', '')}\n\n{output.get('material', '')}"
+                f"{output.get('url', '')}\n\n{output.get('material', '')}{capture_suffix}"
             )
         page = result.get("last_page", {})
-        return (
+        return _clip(
             f"Basic task {result.get('status', 'finished')}: {result.get('task', 'Untitled')}\n"
             f"Reason: {result.get('stop_reason', 'unknown')}\n"
-            f"Last page: {page.get('title', 'Untitled')}\n{page.get('url', '')}"
+            f"Last page: {page.get('title', 'Untitled')}\n{page.get('url', '')}{capture_suffix}"
         )
     if result.get("mode") == "research":
         if result.get("status") == "answered":
@@ -281,6 +291,8 @@ class RunManager:
         self._logs: list[str] = []
         self._stop_requested = False
         self._reply_turn: int | None = None
+        self._run_id: str | None = None
+        self._last_archive: str | None = None
 
     def _append_log(self, source: str, line: str) -> None:
         clean = line.rstrip()
@@ -303,9 +315,12 @@ class RunManager:
             if self._process is not None and self._process.poll() is None:
                 raise RuntimeError("A Brownie run is already active")
             self.trace_path.parent.mkdir(parents=True, exist_ok=True)
+            self.trace_path.unlink(missing_ok=True)
+            self.inspector_path.unlink(missing_ok=True)
             self._logs = [f"command: {json.dumps(command, ensure_ascii=False)}"]
             self._status, self._message = "starting", "Starting Brownie and Chrome..."
             self._stop_requested, self._reply_turn = False, None
+            self._run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(4)
             options: dict[str, Any] = {
                 "cwd": self.runtime_dir, "stdin": subprocess.PIPE, "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE, "text": True, "bufsize": 1, "env": environment,
@@ -328,6 +343,58 @@ class RunManager:
             self._append_log(source, line)
         stream.close()
 
+    def _archive_run(self) -> str | None:
+        """Keep the exact trace and a factual index after a run finishes."""
+        if not self._run_id or not self.trace_path.exists():
+            return None
+        archive_dir = self.trace_path.parent / "runs"
+        archive_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        archive_path = archive_dir / f"{self._run_id}.jsonl"
+        descriptor = os.open(archive_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as destination, self.trace_path.open("rb") as source:
+            shutil.copyfileobj(source, destination)
+        events = _read_trace(archive_path)
+        run = next((item.get("data", {}) for item in events if item.get("event") == "run"), {})
+        result = next((item.get("data", {}).get("result", {}) for item in reversed(events)
+                       if item.get("event") == "run_result"), {})
+        decisions = [
+            {"decision": plan.get("decision"), "reason": plan.get("reason")}
+            for item in events if item.get("event") == "research_plan"
+            if isinstance(plan := item.get("data", {}).get("plan"), dict)
+        ]
+        questions = {
+            item.get("data", {}).get("turn"): item.get("data", {}).get("question")
+            for item in events if item.get("event") == "research_question"
+        }
+        clarifications = [
+            {"turn": turn, "question": questions.get(turn), "answer": data.get("answer")}
+            for item in events if item.get("event") == "research_answer"
+            if isinstance(data := item.get("data", {}), dict)
+            if isinstance(turn := data.get("turn"), int)
+        ]
+        source_links = [
+            {"id": source.get("id"), "title": source.get("title"), "url": source.get("url")}
+            for source in result.get("sources", []) if isinstance(source, dict)
+        ] if isinstance(result, dict) else []
+        summary = {
+            "run_id": self._run_id,
+            "mode": run.get("mode"),
+            "goal": run.get("goal"),
+            "process_status": self._status,
+            "result_status": result.get("status") if isinstance(result, dict) else None,
+            "stop_reason": result.get("stop_reason") if isinstance(result, dict) else None,
+            "last_page": result.get("last_page") if isinstance(result, dict) else None,
+            "planner_proposals": decisions,
+            "user_clarifications": clarifications,
+            "source_links": source_links,
+            "trace": archive_path.name,
+        }
+        summary_path = archive_path.with_suffix(".json")
+        descriptor = os.open(summary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as destination:
+            json.dump(summary, destination, ensure_ascii=False, indent=2)
+        return self._run_id
+
     def _wait(self, process: subprocess.Popen[str]) -> None:
         code = process.wait()
         with self._lock:
@@ -339,6 +406,10 @@ class RunManager:
                 self._status, self._message = "completed", "Finished"
             else:
                 self._status, self._message = "failed", f"Brownie exited with status {code}"
+            try:
+                self._last_archive = self._archive_run()
+            except OSError as exc:
+                self._logs.append(f"archive: {exc}")
 
     def close_browser(self) -> None:
         with self._lock:
@@ -417,6 +488,9 @@ class RunManager:
                 "question": pending_question if can_reply else "",
                 "research_state": research_state,
                 "event_count": len(events), "events": summaries[-30:],
+                "result": result,
+                "run_id": self._run_id,
+                "last_archive": self._last_archive,
                 "reply": (
                     f"I need one decision before continuing:\n\n{pending_question}"
                     if can_reply else _result_reply(result) if result is not None else ""
@@ -439,10 +513,10 @@ details.settings{border-top:1px solid var(--line);margin-top:18px;padding-top:14
 <div id="goal-wrap"><label for="goal">Goal</label><textarea id="goal" placeholder="Find the official..."></textarea></div>
 <div id="url-wrap" class="hidden"><label for="url">Start URL</label><input id="url" type="url" placeholder="https://example.com"></div>
 <div id="basic-wrap" class="hidden"><label for="task-path">Task JSON path</label><input id="task-path" type="text" placeholder="tasks/report.json"><label for="basic-inputs">Task inputs</label><textarea id="basic-inputs" placeholder="query=solar report&#10;region=Azerbaijan"></textarea><p class="help">One NAME=VALUE per line. Do not enter passwords, tokens, or payment data.</p></div>
-<div class="row"><div><label for="browser">Browser start</label><select id="browser"><option value="managed">Ordinary Chrome + CDP</option><option value="playwright">Playwright-owned Chrome</option><option value="attach">Existing debug Chrome</option></select></div><div id="steerer-wrap"><label for="steerer">Steering</label><select id="steerer"><option value="jev">Jev</option><option value="llm">LLM</option></select></div></div>
+<div class="row"><div><label for="browser">Browser start</label><select id="browser"><option value="managed">Ordinary Chrome + CDP</option><option value="playwright">Playwright-owned Chrome</option><option value="firefox">Playwright Firefox</option><option value="webkit">Playwright WebKit</option><option value="attach">Existing debug Chrome</option></select></div><div id="steerer-wrap"><label for="steerer">Steering</label><select id="steerer"><option value="jev">Jev</option><option value="llm">LLM</option></select></div></div>
 <div class="row" id="budgets"><div><label for="max-steps">Actions</label><input id="max-steps" type="number" min="1" max="100" value="8"></div><div><label for="max-pages">Pages</label><input id="max-pages" type="number" min="1" max="30" value="3"></div></div>
 <div id="research-budget"><label for="max-sources">Sources</label><input id="max-sources" type="number" min="1" max="5" value="3"><p class="help">Research stops after this many distinct sources.</p></div>
-<label class="toggle"><input id="keep-open" type="checkbox" checked> Leave Brownie's Chrome open after it finishes</label><p class="help" id="browser-help"></p>
+<label class="toggle"><input id="keep-open" type="checkbox" checked> Leave Brownie's browser open after it finishes</label><p class="help" id="browser-help"></p>
 <div class="error" id="error"></div><div class="buttons"><button id="start">Start run</button><button class="secondary" id="close" disabled>Close Brownie browser</button><button class="danger" id="stop" disabled>Stop run</button><button class="secondary" id="quit">Quit Brownie</button></div>
 <details class="settings"><summary>Model keys</summary><p class="help">Saved only on this computer. Brownie never shows a saved key again.</p>
 <label for="typesafe-key">TypeSafe key for Jev</label><input id="typesafe-key" type="password" autocomplete="off">
@@ -459,7 +533,7 @@ function formState(){return{mode:$('mode').value,goal:$('goal').value,url:$('url
 function keyState(){return{typesafe_api_key:$('typesafe-key').value,gemini_api_key:$('gemini-key').value}}
 async function updateSettings(){const response=await fetch('/api/state',{headers:{'X-Brownie-Token':TOKEN}}),state=await response.json(),settings=state.settings||{};setText('key-status','Jev: '+(settings.jev_configured?'ready':'key needed')+' · LLM: '+(settings.llm_configured?'ready':'key needed')+' · Typing: '+(settings.text_configured?'ready':'key needed'))}
 async function post(path,body={}){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Brownie-Token':TOKEN},body:JSON.stringify(body)}),value=await response.json();if(!response.ok)throw new Error(value.error||'Request failed');return value}
-function adaptForm(){const mode=$('mode').value,browser=$('browser').value,owned=['search','research','basic'];$('url-wrap').classList.toggle('hidden',owned.includes(mode));$('basic-wrap').classList.toggle('hidden',mode!=='basic');$('goal-wrap').classList.toggle('hidden',!['search','research','predict','step'].includes(mode));$('steerer-wrap').classList.toggle('hidden',!['search','research','predict','step'].includes(mode));$('budgets').classList.toggle('hidden',mode!=='search');$('research-budget').classList.toggle('hidden',mode!=='research');if(owned.includes(mode)&&browser==='attach')$('browser').value='managed';$('browser').querySelector('[value="attach"]').disabled=owned.includes(mode);$('keep-open').disabled=$('browser').value==='attach'||mode==='predict';const help={managed:'Uses a dedicated profile and starts ordinary headed Chrome through localhost CDP.',playwright:"Starts Playwright-owned headed Chrome with Brownie's isolated profile.",attach:'Reuses a matching tab in Chrome already started with remote debugging. Brownie does not close it.'};$('browser-help').textContent=help[$('browser').value]}
+function adaptForm(){const mode=$('mode').value,browser=$('browser').value,owned=['search','research','basic'];$('url-wrap').classList.toggle('hidden',owned.includes(mode));$('basic-wrap').classList.toggle('hidden',mode!=='basic');$('goal-wrap').classList.toggle('hidden',!['search','research','predict','step'].includes(mode));$('steerer-wrap').classList.toggle('hidden',!['search','research','predict','step'].includes(mode));$('budgets').classList.toggle('hidden',mode!=='search');$('research-budget').classList.toggle('hidden',mode!=='research');if(owned.includes(mode)&&browser==='attach')$('browser').value='managed';$('browser').querySelector('[value="attach"]').disabled=owned.includes(mode);$('keep-open').disabled=$('browser').value==='attach'||mode==='predict';const help={managed:'Uses a dedicated profile and starts ordinary headed Chrome through localhost CDP.',playwright:"Starts Playwright-owned headed Chrome with Brownie's isolated profile.",firefox:'Starts a separate Playwright Firefox profile. Install its browser build first.',webkit:'Starts a separate Playwright WebKit profile. Install its browser build first.',attach:'Reuses a matching tab in Chrome already started with remote debugging. Brownie does not close it.'};$('browser-help').textContent=help[$('browser').value]}
 async function update(){try{const response=await fetch('/api/state',{headers:{'X-Brownie-Token':TOKEN}}),state=await response.json();setText('status',state.message);$('start').disabled=state.active;$('close').disabled=!state.can_close;$('stop').disabled=!state.can_stop;$('dialogue').classList.toggle('hidden',!state.can_reply);$('send-reply').disabled=!state.can_reply;setText('reply',state.reply||(state.active?'Brownie is working...':'No result yet.'));const research=state.research_state;$('research-state').classList.toggle('hidden',!research);if(research){setText('research-decision',research.decision+(Number.isInteger(research.remaining)?' · '+research.remaining+' source slots left':''));setText('research-reason',research.reason);setList('research-needs',research.evidence_needs,'No open need reported.');setList('research-sources',research.sources.map(source=>'['+source.id+'] '+source.title+' · '+source.url),'No sources collected yet.')}const eventKey=JSON.stringify(state.events);if(eventKey!==lastEvents){$('events').replaceChildren(...(state.events.length?state.events:['Waiting for decisions.']).map(text=>{const li=document.createElement('li');li.textContent=text;return li}));lastEvents=eventKey}const logText=state.logs.join('\n')||'No process output.';if(logText!==lastLogs){$('logs').textContent=logText;lastLogs=logText}if(state.inspector_ready&&state.event_count!==lastInspectorCount&&['completed','failed','stopped','awaiting_close'].includes(state.status)){$('inspector').src='/inspector?t='+encodeURIComponent(TOKEN)+'&v='+state.event_count;lastInspectorCount=state.event_count}}catch(error){setText('error',error.message)}}
 $('save-settings').addEventListener('click',async()=>{$('error').textContent='';try{await post('/api/settings',keyState());$('typesafe-key').value='';$('gemini-key').value='';await updateSettings()}catch(error){$('error').textContent=error.message}});updateSettings();
 $('quit').addEventListener('click',async()=>{try{await post('/api/quit');document.body.innerHTML='<main><section class="panel"><h1>Brownie has stopped.</h1><p>You can close this tab.</p></section></main>'}catch(error){$('error').textContent=error.message}});
@@ -562,6 +636,18 @@ class UIRequestHandler(BaseHTTPRequestHandler):
         self._json({"ok": True})
 
 
+def _write_api_token(path: Path, token: str) -> None:
+    """Atomically publish one owner-only token for localhost API clients."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".brownie-token-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(token + "\n")
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 class BrownieServer(ThreadingHTTPServer):
     manager: RunManager
     token: str
@@ -583,8 +669,11 @@ def main() -> None:
     os.environ["BROWNIE_RUNTIME_DIR"] = str(args.runtime_dir.resolve())
     server = BrownieServer(("127.0.0.1", args.port), UIRequestHandler)
     server.manager, server.token = RunManager(args.runtime_dir), secrets.token_urlsafe(32)
+    token_path = args.runtime_dir.resolve() / "artifacts" / "api-token"
+    _write_api_token(token_path, server.token)
     url = f"http://127.0.0.1:{args.port}/"
     print(f"Brownie control room: {url}")
+    print(f"Local API token: {token_path}")
     print("Only this computer can connect. Press Ctrl+C here to stop the control room.")
     if not args.no_open:
         webbrowser.open(url)
@@ -594,6 +683,8 @@ def main() -> None:
         print("\nBrownie control room stopped.")
     finally:
         server.server_close()
+        if token_path.exists() and token_path.read_text(encoding="utf-8").strip() == server.token:
+            token_path.unlink()
 
 
 if __name__ == "__main__":

@@ -35,7 +35,9 @@ def parser() -> argparse.ArgumentParser:
         type=Path,
         help="Dedicated profile directory (default: .browser-profile or .browser-profile-cdp)",
     )
-    result.add_argument("--channel", default="chrome", help="Installed Chromium channel (default: chrome)")
+    result.add_argument("--browser", choices=("chromium", "firefox", "webkit"), default="chromium",
+                        help="Playwright browser engine (default: chromium)")
+    result.add_argument("--channel", help="Installed Chromium channel (default: chrome)")
     browser_mode = result.add_mutually_exclusive_group()
     browser_mode.add_argument(
         "--attach",
@@ -251,6 +253,11 @@ def print_basic_task(result: dict) -> None:
     print(f"Status: {result['status']} ({result['stop_reason']})")
     page = result["last_page"]
     print(f"Last page: {page['title']}\n{page['url']}")
+    captures = result.get("captures") or {}
+    if captures:
+        print("Captured values:")
+        for name, record in captures.items():
+            print(f"  {name}: {record['value']} ({record['url']})")
     output = result.get("output")
     if output and output.get("material"):
         print(f"\nRead with {output['scrolls']} scroll(s); stopped: {output['stop_reason']}\n")
@@ -310,11 +317,17 @@ def main() -> None:
         argument_parser.error("--use-open-tab requires --attach")
     if args.chrome_executable and not args.managed_cdp:
         argument_parser.error("--chrome-executable requires --managed-cdp")
+    if args.browser != "chromium" and (args.attach or args.managed_cdp or args.channel):
+        argument_parser.error("Firefox and WebKit use Playwright launch; CDP attachment and --channel require Chromium")
     if args.steerer and not (args.predict or args.step or args.search or args.research):
         argument_parser.error("--steerer requires --predict, --step, --search, or --research")
     if args.predict or args.step or args.search or args.research:
         load_env(args.env_file)
-    profile_dir = args.profile or Path(".browser-profile-cdp" if args.managed_cdp else ".browser-profile")
+    default_profile = (
+        ".browser-profile-cdp" if args.managed_cdp else
+        ".browser-profile" if args.browser == "chromium" else f".browser-profile-{args.browser}"
+    )
+    profile_dir = args.profile or Path(default_profile)
     cdp_url = args.cdp_endpoint if args.attach or args.managed_cdp else None
     with ExitStack() as stack:
         recorder = stack.enter_context(TraceRecorder(args.trace)) if args.trace else None
@@ -346,8 +359,9 @@ def main() -> None:
             BrowserSession(
                 profile_dir=profile_dir,
                 headed=args.headed or args.login or args.search or args.research or args.keep_open,
-                channel=args.channel,
+                channel=args.channel or "chrome",
                 cdp_url=cdp_url,
+                browser_type=args.browser,
             )
         )
         if args.basic_task:

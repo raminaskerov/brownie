@@ -62,11 +62,17 @@ class BrowserSession:
         headed: bool = False,
         channel: str = "chrome",
         cdp_url: str | None = None,
+        browser_type: str = "chromium",
     ):
         self.profile_dir = Path(profile_dir).expanduser().resolve()
         self.headed = headed
+        if browser_type not in {"chromium", "firefox", "webkit"}:
+            raise ValueError("browser_type must be chromium, firefox, or webkit")
+        if cdp_url and browser_type != "chromium":
+            raise ValueError("CDP attachment is available only for Chromium")
         self.channel = channel
         self.cdp_url = cdp_url
+        self.browser_type = browser_type
         self._playwright = None
         self._browser = None
         self._attached = False
@@ -96,13 +102,15 @@ class BrowserSession:
                 self._attached = True
             else:
                 self.profile_dir.mkdir(parents=True, exist_ok=True)
-                self.context = self._playwright.chromium.launch_persistent_context(
-                    user_data_dir=self.profile_dir,
-                    channel=self.channel,
-                    headless=not self.headed,
-                    chromium_sandbox=True,
-                    viewport={"width": 1120, "height": 780},
-                )
+                launch_options = {
+                    "user_data_dir": self.profile_dir,
+                    "headless": not self.headed,
+                    "viewport": {"width": 1120, "height": 780},
+                }
+                if self.browser_type == "chromium":
+                    launch_options.update(channel=self.channel, chromium_sandbox=True)
+                engine = getattr(self._playwright, self.browser_type)
+                self.context = engine.launch_persistent_context(**launch_options)
                 self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
         except Exception as exc:
             if self._browser is not None:
@@ -115,9 +123,14 @@ class BrowserSession:
                     f"Brownie could not attach to Chrome at {self.cdp_url}. "
                     "Start the dedicated Chrome debugging session first."
                 ) from exc
+            if self.browser_type == "chromium":
+                raise RuntimeError(
+                    "Chrome failed to start while its security sandbox was required. "
+                    "Brownie will not retry with --no-sandbox."
+                ) from exc
             raise RuntimeError(
-                "Chrome failed to start while its security sandbox was required. "
-                "Brownie will not retry with --no-sandbox."
+                f"{self.browser_type.capitalize()} failed to start. "
+                "Check its Playwright browser build and system dependencies."
             ) from exc
         return self
 

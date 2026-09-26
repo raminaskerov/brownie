@@ -197,3 +197,41 @@ def test_scroll_returns_false_when_page_ignores_wheel(method, position):
     session.page = Page()
 
     assert getattr(session, method)() is False
+
+
+@pytest.mark.parametrize("browser_type", ["firefox", "webkit"])
+def test_other_playwright_engines_use_their_own_launch_without_chrome_options(monkeypatch, tmp_path, browser_type):
+    launched = {}
+
+    class FakeContext:
+        pages = [object()]
+
+        def close(self):
+            pass
+
+    class Engine:
+        def launch_persistent_context(self, **options):
+            launched.update(options)
+            return FakeContext()
+
+    class FakePlaywright:
+        def __init__(self):
+            setattr(self, browser_type, Engine())
+
+        def stop(self):
+            pass
+
+    class Manager:
+        def start(self):
+            return FakePlaywright()
+
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: Manager())
+
+    with BrowserSession(profile_dir=tmp_path / browser_type, browser_type=browser_type):
+        pass
+
+    assert launched["user_data_dir"] == (tmp_path / browser_type).resolve()
+    assert "chromium_sandbox" not in launched
+    assert "channel" not in launched
+    with pytest.raises(ValueError, match="only for Chromium"):
+        BrowserSession(browser_type=browser_type, cdp_url="http://127.0.0.1:9222")

@@ -14,6 +14,7 @@ from .trace import trace_event
 BASIC_TASK_VERSION = 1
 BASIC_OPERATIONS = frozenset({
     "TYPE_TEXT",
+    "CAPTURE_TEXT",
     "SUBMIT",
     "CLICK",
     "SCROLL_DOWN",
@@ -25,6 +26,8 @@ BASIC_OPERATIONS = frozenset({
 TARGETED_OPERATIONS = frozenset({"TYPE_TEXT", "SUBMIT", "CLICK"})
 MAX_BASIC_STEPS = 50
 MAX_BASIC_SCROLLS = 10
+MAX_CAPTURES = 20
+MAX_CAPTURE_CHARS = 2000
 MAX_STALE_REFRESHES = 3
 INPUT_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 
@@ -42,7 +45,10 @@ class BasicStep:
     operation: str
     target: TargetSpec | None = None
     input_name: str | None = None
+    capture_name: str | None = None
     value: str | None = None
+    line_contains: str | None = None
+    extract_after: str | None = None
     check: dict[str, str] | None = None
     max_scrolls: int = 0
 
@@ -128,7 +134,10 @@ def _parse_step(raw, offset: int, input_names: set[str]) -> BasicStep:
     _check_keys(
         value,
         label,
-        allowed={"operation", "target", "input", "value", "check", "max_scrolls"},
+        allowed={
+            "operation", "target", "input", "capture", "save_as", "line_contains", "extract_after",
+            "value", "check", "max_scrolls",
+        },
         required={"operation"},
     )
     operation = _non_empty_string(value["operation"], f"{label}.operation", maximum=30).upper()
@@ -143,18 +152,36 @@ def _parse_step(raw, offset: int, input_names: set[str]) -> BasicStep:
         raise ValueError(f"{label}.target is not accepted for {operation}")
 
     input_name = value.get("input")
+    capture_name = value.get("capture")
     literal = value.get("value")
     if operation == "TYPE_TEXT":
-        if (input_name is None) == (literal is None):
-            raise ValueError(f"{label} TYPE_TEXT requires exactly one of input or value")
+        if sum(item is not None for item in (input_name, capture_name, literal)) != 1:
+            raise ValueError(f"{label} TYPE_TEXT requires exactly one of input, capture, or value")
         if input_name is not None:
             input_name = _non_empty_string(input_name, f"{label}.input", maximum=64)
             if input_name not in input_names:
                 raise ValueError(f"{label}.input names an undeclared task input: {input_name}")
+        if capture_name is not None:
+            capture_name = _non_empty_string(capture_name, f"{label}.capture", maximum=64)
+            if not INPUT_NAME.fullmatch(capture_name):
+                raise ValueError(f"{label}.capture has an invalid name")
         if literal is not None:
             literal = _non_empty_string(literal, f"{label}.value", maximum=2000)
-    elif input_name is not None or literal is not None:
-        raise ValueError(f"{label} accepts input or value only for TYPE_TEXT")
+    elif input_name is not None or literal is not None or capture_name is not None:
+        raise ValueError(f"{label} accepts input, capture, or value only for TYPE_TEXT")
+
+    save_as = value.get("save_as")
+    line_contains = value.get("line_contains")
+    extract_after = value.get("extract_after")
+    if operation == "CAPTURE_TEXT":
+        save_as = _non_empty_string(save_as, f"{label}.save_as", maximum=64)
+        if not INPUT_NAME.fullmatch(save_as):
+            raise ValueError(f"{label}.save_as has an invalid name")
+        line_contains = _non_empty_string(line_contains, f"{label}.line_contains", maximum=300)
+        if extract_after is not None:
+            extract_after = _non_empty_string(extract_after, f"{label}.extract_after", maximum=300)
+    elif any(item is not None for item in (save_as, line_contains, extract_after)):
+        raise ValueError(f"{label} accepts save_as, line_contains, or extract_after only for CAPTURE_TEXT")
 
     check = value.get("check")
     if operation == "ASSERT":
@@ -184,7 +211,10 @@ def _parse_step(raw, offset: int, input_names: set[str]) -> BasicStep:
         operation=operation,
         target=target,
         input_name=input_name,
+        capture_name=capture_name if operation == "TYPE_TEXT" else save_as,
         value=literal,
+        line_contains=line_contains,
+        extract_after=extract_after,
         check=check,
         max_scrolls=max_scrolls,
     )
@@ -231,6 +261,16 @@ def parse_basic_task(raw) -> BasicTask:
     if not isinstance(raw_steps, list) or not 1 <= len(raw_steps) <= MAX_BASIC_STEPS:
         raise ValueError(f"task.steps must contain from 1 to {MAX_BASIC_STEPS} steps")
     steps = tuple(_parse_step(step, offset, set(input_names)) for offset, step in enumerate(raw_steps))
+    captures_seen = set()
+    for offset, step in enumerate(steps):
+        if step.operation == "CAPTURE_TEXT":
+            if step.capture_name in captures_seen or step.capture_name in input_names:
+                raise ValueError(f"steps[{offset}].save_as must be unique and cannot shadow an input")
+            captures_seen.add(step.capture_name)
+            if len(captures_seen) > MAX_CAPTURES:
+                raise ValueError(f"task may capture at most {MAX_CAPTURES} values")
+        elif step.operation == "TYPE_TEXT" and step.capture_name and step.capture_name not in captures_seen:
+            raise ValueError(f"steps[{offset}].capture must name an earlier CAPTURE_TEXT step")
     if any(step.operation in {"DONE", "READ_PAGE"} for step in steps[:-1]):
         raise ValueError("DONE and READ_PAGE may appear only as the final task step")
     return BasicTask(
@@ -382,7 +422,10 @@ def _origin_allowed(url: str, allowed_origins: tuple[str, ...]) -> bool:
         return False
 
 
-def _stop_result(task: BasicTask, observation: dict, steps: list[dict], reason: str, **extra) -> dict:
+def _stop_result(
+    task: BasicTask, observation: dict, steps: list[dict], reason: str,
+    *, captures: dict[str, dict] | None = None, **extra,
+) -> dict:
     result = {
         "mode": "basic",
         "task": task.name,
@@ -391,9 +434,35 @@ def _stop_result(task: BasicTask, observation: dict, steps: list[dict], reason: 
         "steps": steps,
         "last_page": _page_summary(observation),
         "output": None,
+        "captures": dict(captures or {}),
     }
     result.update(extra)
     return result
+
+
+def _capture_visible_line(observation: dict, step: BasicStep) -> tuple[str | None, str | None]:
+    """Capture one unique line from the bounded, currently visible DOM text."""
+    if _perception_gap(observation):
+        return None, "perception_incomplete"
+    visible_text = observation["text"].split("[Accessibility structure; non-executable]", 1)[0]
+    matching = [
+        line.strip() for line in visible_text.splitlines()
+        if step.line_contains.casefold() in line.casefold()
+    ]
+    if not matching:
+        return None, "capture_not_found"
+    if len(matching) != 1:
+        return None, "capture_ambiguous"
+    captured = matching[0]
+    if step.extract_after is not None:
+        marker = step.extract_after.casefold()
+        if captured.casefold().count(marker) != 1:
+            return None, "capture_marker_ambiguous"
+        position = captured.casefold().index(marker) + len(step.extract_after)
+        captured = captured[position:].strip()
+    if not captured or len(captured) > MAX_CAPTURE_CHARS:
+        return None, "capture_invalid"
+    return captured, None
 
 
 def run_basic_task(browser, task: BasicTask, inputs: dict[str, str] | None = None) -> dict:
@@ -404,22 +473,37 @@ def run_basic_task(browser, task: BasicTask, inputs: dict[str, str] | None = Non
     browser.open(task.start_url)
     observation = browser.observe()
     steps = []
+    captures: dict[str, dict] = {}
+
+    def stop(reason: str, **extra) -> dict:
+        return _stop_result(task, observation, steps, reason, captures=captures, **extra)
+
     if not _origin_allowed(observation["url"], task.allowed_origins):
-        return _stop_result(task, observation, steps, "origin_not_allowed")
+        return stop("origin_not_allowed")
 
     for offset, step in enumerate(task.steps):
         trace_event("basic_step", {"index": offset, "operation": step.operation})
         access = classify_access(observation)
         if access["status"] != READY:
-            return _stop_result(task, observation, steps, access["status"])
+            return stop(access["status"])
 
         if step.operation == "ASSERT":
             failed = _assertion_failure(observation, step.check)
             if failed:
                 reason = "perception_incomplete" if failed == "text_contains" and _perception_gap(observation) \
                     else "assertion_failed"
-                return _stop_result(task, observation, steps, reason, failed_assertion=failed)
+                return stop(reason, failed_assertion=failed)
             steps.append({"index": offset, "operation": "ASSERT", "status": "passed"})
+            continue
+
+        if step.operation == "CAPTURE_TEXT":
+            captured, reason = _capture_visible_line(observation, step)
+            if reason:
+                return stop(reason, failed_step=offset)
+            captures[step.capture_name] = {"value": captured, "url": observation["url"]}
+            steps.append({
+                "index": offset, "operation": "CAPTURE_TEXT", "status": "captured", "name": step.capture_name,
+            })
             continue
 
         if step.operation == "READ_PAGE":
@@ -447,6 +531,7 @@ def run_basic_task(browser, task: BasicTask, inputs: dict[str, str] | None = Non
                     "scrolls": report["scrolls"],
                     "stop_reason": report["stop_reason"],
                 },
+                "captures": captures,
             }
 
         if step.operation == "DONE":
@@ -459,6 +544,7 @@ def run_basic_task(browser, task: BasicTask, inputs: dict[str, str] | None = Non
                 "steps": steps,
                 "last_page": _page_summary(observation),
                 "output": None,
+                "captures": captures,
             }
 
         stale_refreshes = 0
@@ -467,11 +553,12 @@ def run_basic_task(browser, task: BasicTask, inputs: dict[str, str] | None = Non
             if step.operation in TARGETED_OPERATIONS:
                 element, reason = _target_for_step(observation, step)
                 if reason:
-                    return _stop_result(task, observation, steps, reason, failed_step=offset)
+                    return stop(reason, failed_step=offset)
                 if reason := _safe_target_reason(step, element, observation, task.allowed_origins):
-                    return _stop_result(task, observation, steps, reason, failed_step=offset)
+                    return stop(reason, failed_step=offset)
             text = (
                 inputs[step.input_name] if step.operation == "TYPE_TEXT" and step.input_name
+                else captures[step.capture_name]["value"] if step.operation == "TYPE_TEXT" and step.capture_name
                 else step.value if step.operation == "TYPE_TEXT" else None
             )
             try:
@@ -487,20 +574,14 @@ def run_basic_task(browser, task: BasicTask, inputs: dict[str, str] | None = Non
                 stale_refreshes += 1
                 observation = browser.observe()
                 if not _origin_allowed(observation["url"], task.allowed_origins):
-                    return _stop_result(task, observation, steps, "origin_not_allowed")
+                    return stop("origin_not_allowed")
                 if stale_refreshes >= MAX_STALE_REFRESHES:
-                    return _stop_result(
-                        task,
-                        observation,
-                        steps,
+                    return stop(
                         "stale_observation_limit",
                         failed_step=offset,
                     )
             except ValueError:
-                return _stop_result(
-                    task,
-                    observation,
-                    steps,
+                return stop(
                     "operation_unavailable",
                     failed_step=offset,
                 )
@@ -526,9 +607,9 @@ def run_basic_task(browser, task: BasicTask, inputs: dict[str, str] | None = Non
         steps.append(step_result)
         observation = after
         if not _origin_allowed(observation["url"], task.allowed_origins):
-            return _stop_result(task, observation, steps, "origin_not_allowed")
+            return stop("origin_not_allowed")
         if execution["executed"] and not step_result["observation_changed"]:
-            return _stop_result(task, observation, steps, "no_effect", failed_step=offset)
+            return stop("no_effect", failed_step=offset)
 
     return {
         "mode": "basic",
@@ -538,4 +619,5 @@ def run_basic_task(browser, task: BasicTask, inputs: dict[str, str] | None = Non
         "steps": steps,
         "last_page": _page_summary(observation),
         "output": None,
+        "captures": captures,
     }
